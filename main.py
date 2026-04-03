@@ -1,3 +1,4 @@
 from generator import hypergraph
-h = hypergraph(100, 1000)
+h = hypergraph(30, 100)
+h.elements()
 h.distribution()
