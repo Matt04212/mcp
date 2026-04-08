@@ -1,5 +1,4 @@
 """import matplotlib.pyplot as plt
-
 filename = "data1.hgr"
 hedge_size = []
 
@@ -14,34 +13,23 @@ plt.hist(hedge_size, bins=100)
 plt.show()"""
 import subprocess
 
-def algo(hg):
-    subprocess.run("./hmetis data1.hgr 2 5 10 2 1 0 0 0", shell=True)
+def algo(hg, nparts):
+    subprocess.run(f"./hmetis data1.hgr {nparts} 5 10 2 1 0 0 0", shell=True)
 
-    with open("data1.hgr.part.2", "r") as f:
+    with open(f'data1.hgr.part.{nparts}', "r") as f:
         line = f.read().splitlines()
 
-    s0 = set()
-    s1 = set()
-    s2 = set()
-    s3 = set()
+    partitions = {}
     for vtx, part in enumerate(line, start=1):
-        if part == "0":
-            hedge = [h for h, v in hg.hedges_dict.items() if vtx in v]
-            s0.update(hedge)
-        elif part == "1":
-            hedge = [h for h, v in hg.hedges_dict.items() if vtx in v]
-            s1.update(hedge)
-        elif part == "2":
-            hedge = [h for h, v in hg.hedges_dict.items() if vtx in v]
-            s2.update(hedge)
-        else:
-            hedge = [h for h, v in hg.hedges_dict.items() if vtx in v]
-            s3.update(hedge)
+        part = int(part)
 
-    print(len(s0))
-    print(len(s1))
-    print(len(s2))
-    print(len(s3))
+        if part not in partitions:
+            partitions[part] = set()
+
+        partitions[part].update(hg.vtxs_dict[vtx])
+
+    for n in range(nparts):
+        print(len(partitions[n]))
 
 
 
