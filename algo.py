@@ -28,8 +28,27 @@ def algo(hg, nparts):
 
         partitions[part].update(hg.vtxs_dict[vtx])
 
+    solu = set()
     for n in range(nparts):
-        print(len(partitions[n]))
+        best_score = 0
+        best_edge = None
+        for hedge in hg.hedges:
+            score = len(hg.hedges_dict[hedge].intersection(partitions[n]))
+            if score > best_score and hedge not in solu:
+                best_score = score
+                best_edge = hedge
+            else:
+                continue
+
+        print("edge:", best_edge)
+        solu.add(best_edge)
+
+    
+
+
+
+
+
 
 
 

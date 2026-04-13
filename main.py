@@ -1,9 +1,9 @@
-from generator import hypergraph
+from hypergraph import Hypergraph
 from algo import algo
 import matplotlib.pyplot as plt
 
-hg = hypergraph(1000,1000)
+hg = Hypergraph(10000,10000)
 hg.generate()
 hg.output("data1.hgr")
 
-output = algo(hg)
+solution = algo(hg, 4)

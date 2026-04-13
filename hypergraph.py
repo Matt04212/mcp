@@ -1,8 +1,7 @@
 import numpy as np
 import random
-import matplotlib.pyplot as plt
 
-class hypergraph:
+class Hypergraph:
     def __init__(self, nhedges, nvtxs):
         self.nhedges = nhedges
         self.nvtxs = nvtxs
@@ -10,18 +9,18 @@ class hypergraph:
         self.hedges = list(range(1,nhedges+1))
         self.vtxs = list(range(1, nvtxs+1))
 
-    def generate(self):
         hedge_size = np.ceil(np.random.exponential(scale=15.0, size=self.nhedges)).astype(int)
         self.hedge_size = np.clip(hedge_size, 1, self.nvtxs)
         self.hedges_dict = {}
         self.vtxs_dict = {vtx: set() for vtx in self.vtxs}
+
+    def generate(self):
         for hedge, size in zip(self.hedges, self.hedge_size):
             c = set(random.sample(self.vtxs, size))
             self.hedges_dict[hedge] = c
             for vtx in c:
                 self.vtxs_dict[vtx].add(hedge)
 
-        "insure not isolated nodes"
         for vtx in self.vtxs_dict:
             if not self.vtxs_dict[vtx]:
                 r = random.choice(self.hedges)
