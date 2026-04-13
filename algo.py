@@ -1,16 +1,3 @@
-"""import matplotlib.pyplot as plt
-filename = "data1.hgr"
-hedge_size = []
-
-with open("data1.hgr", "r") as f:
-    lines = f.readlines()
-
-for line in lines[1:]:
-    vtxs = line.strip().split()
-    hedge_size.append(len(vtxs))
-
-plt.hist(hedge_size, bins=100)
-plt.show()"""
 import subprocess
 
 def algo(hg, nparts):
