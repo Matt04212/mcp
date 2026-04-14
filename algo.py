@@ -1,24 +1,33 @@
 import subprocess
 
-def write_hgr(hg, covered_vertices, removed_edges, filname):
+def write_hgr(hg, covered_vertices, removed_edges, filename):
     live_vtxs = [v for v in hg.vtxs if v not in covered_vertices]
     #orginial -> hmetis id
     v_map = {v: i+1 for i, v in enumerate(live_vtxs)}
     #inverse
     v_map_inv = {i+1: v for i, v in enumerate(live_vtxs)}
 
-    return v_map_inv
+    with open(filename, 'w') as f:
+        f.write(f"{hg.nhedges} {hg.nvtxs}\n")
+
+        for hedge in hg.hedges_dict:
+            vtxs = hg.hedges_dict[hedge]
+            line = " ".join(str(n) for n in vtxs)
+            f.write(line + "\n")
+
+    return v_map_inv, filename
+
 
 def algo(hg, nparts, filename):
     covered_vertices = set()
     removed_edges = set()
     solu = []
 
-    v_map_inv = write_hgr(hg, covered_vertices, removed_edges, f"{filename}.part.{nparts}")
+    v_map_inv, filename = write_hgr(hg, covered_vertices, removed_edges, filename)
 
     subprocess.run(f"./hmetis {filename} {nparts} 5 10 2 1 0 0 0", shell=True)
 
-    with open(f'{filename}.part.{nparts}', "r") as f:
+    with open(f"{filename}.part.{nparts}", "r") as f:
         line = f.read().splitlines()
 
     partitions = {}
