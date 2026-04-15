@@ -34,20 +34,32 @@ def algo(hg, nparts, filename):
         live_vtxs = [v for v in hg.vtxs if v not in covered_vertices]
 
         if len(live_vtxs) < nparts:
-            # too small to partition, pick greedy
-            for hedge in hg.hedges:
-                if hedge not in removed_edges:
-                    newly_coverd = hg.hedges_dict[hedge] - covered_vertices
-                    if newly_coverd:
-                        covered_vertices.update(newly_coverd)
-                        removed_edges.add(best_edge)
-                        solu.append(best_edge)
+            # use greedy if small enough
+            sets_used = solu
+            elements_not_covered = set(live_vtxs)
+            while elements_not_covered:
+                elements_covered = set()
+                for set_ in hg.hedges_dict:
 
+                    if set_ in sets_used:
+                        continue
+
+                    current_set = hg.hedges_dict[set_]
+                    would_cover = elements_covered.union(current_set)
+                    if len(would_cover) > len(elements_covered):
+                        elements_covered = would_cover
+                        sets_used.append(set_)
+                        elements_not_covered -= elements_covered
+
+                        if not elements_not_covered:
+                            break
             break
+
+
 
         v_map_inv= write_hgr(hg, covered_vertices, removed_edges, filename)
 
-        subprocess.run(f"./hmetis {filename} {nparts} 5 1 2 3 0 0 0", shell=True)
+        subprocess.run(f"./hmetis {filename} {nparts} 5 1 2 1 0 0 0", shell=True)
 
         with open(f"{filename}.part.{nparts}", "r") as f:
             line = f.read().splitlines()
