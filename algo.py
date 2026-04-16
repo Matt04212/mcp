@@ -1,4 +1,5 @@
 import subprocess
+import time
 
 def write_hgr(hg, covered_vertices, removed_edges, filename):
     live_vtxs = [v for v in hg.vtxs if v not in covered_vertices]
@@ -30,7 +31,11 @@ def algo(hg, nparts, filename):
     removed_edges = set()
     solu = []
 
+    iteration = 0
+
     while len(covered_vertices) < hg.nvtxs:
+
+        t = time.time()
         live_vtxs = [v for v in hg.vtxs if v not in covered_vertices]
 
         if len(live_vtxs) < nparts:
@@ -54,7 +59,6 @@ def algo(hg, nparts, filename):
                         if not elements_not_covered:
                             break
             break
-
 
 
         v_map_inv= write_hgr(hg, covered_vertices, removed_edges, filename)
@@ -99,6 +103,13 @@ def algo(hg, nparts, filename):
             covered_vertices.update(newly_coverd)
             removed_edges.add(best_edge)
             solu.append(best_edge)
+
+        iteration += 1
+        print(f"iter{iteration}:covered = {len(covered_vertices)}, "
+              f"removed_edges = {len(removed_edges)}, time = {time.time() - t:.2f}s")
+
+        if iteration ==5:
+            break
 
     return solu
 
