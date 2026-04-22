@@ -2,9 +2,49 @@ import subprocess
 import time
 import heapq
 from greedy import greedy
-from selection import selection
-from subgraph import write_hgr
 import numpy as np
+def selection(hg, covered_vertices, removed_edges, solu, partitions):
+
+    for n in partitions:
+        candidate_hedge = set()
+        for v in partitions[n]:
+            for hedge in hg.vtxs_dict[v]:
+                if hedge not in removed_edges:
+                    candidate_hedge.add(hedge)
+
+        k = 10
+        top_k = heapq.nlargest(k, candidate_hedge,
+                               key = lambda h: len(hg.hedges_dict[h].intersection(partitions[n])))
+
+        for hedge in top_k:
+            newly_covered = hg.hedges_dict[hedge] - covered_vertices
+            if newly_covered:
+                covered_vertices.update(newly_covered)
+                removed_edges.add(hedge)
+                solu.append(hedge)
+
+def write_hgr(hg, covered_vertices, removed_edges, filename, live_vtxs):
+    # orginial -> hmetis id
+    v_map = {v: i + 1 for i, v in enumerate(live_vtxs)}
+    # inverse
+    v_map_inv = {i + 1: v for i, v in enumerate(live_vtxs)}
+
+    valid_hedges = []
+    for hedge in hg.hedges_dict:
+        if hedge in removed_edges:
+            continue
+        live_vtxs_in_edge = [v_map[v] for v in hg.hedges_dict[hedge]
+                             if v not in covered_vertices]
+        if not live_vtxs_in_edge:
+            continue
+        valid_hedges.append(live_vtxs_in_edge)
+
+    with open(filename, 'w') as f:
+        f.write(f"{len(valid_hedges)} {len(live_vtxs)}\n")
+        for edge in valid_hedges:
+            f.write(" ".join(str(v) for v in edge) + "\n")
+
+    return v_map_inv
 
 def algo(hg, nparts, filename):
     covered_vertices = set()
