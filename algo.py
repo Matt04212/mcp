@@ -1,74 +1,31 @@
-import subprocess
-import time
-import heapq
+import subprocess, time, heapq
 from greedy import greedy
 import numpy as np
-def selection(hg, covered_vertices, removed_edges, solu, partitions):
-
-    for n in partitions:
-        candidate_hedge = set()
-        for v in partitions[n]:
-            for hedge in hg.vtxs_dict[v]:
-                if hedge not in removed_edges:
-                    candidate_hedge.add(hedge)
-
-        k = 10
-        top_k = heapq.nlargest(k, candidate_hedge,
-                               key = lambda h: len(hg.hedges_dict[h].intersection(partitions[n])))
-
-        for hedge in top_k:
-            newly_covered = hg.hedges_dict[hedge] - covered_vertices
-            if newly_covered:
-                covered_vertices.update(newly_covered)
-                removed_edges.add(hedge)
-                solu.append(hedge)
-
-def write_hgr(hg, covered_vertices, removed_edges, filename, live_vtxs):
-    # orginial -> hmetis id
-    v_map = {v: i + 1 for i, v in enumerate(live_vtxs)}
-    # inverse
-    v_map_inv = {i + 1: v for i, v in enumerate(live_vtxs)}
-
-    valid_hedges = []
-    for hedge in hg.hedges_dict:
-        if hedge in removed_edges:
-            continue
-        live_vtxs_in_edge = [v_map[v] for v in hg.hedges_dict[hedge]
-                             if v not in covered_vertices]
-        if not live_vtxs_in_edge:
-            continue
-        valid_hedges.append(live_vtxs_in_edge)
-
-    with open(filename, 'w') as f:
-        f.write(f"{len(valid_hedges)} {len(live_vtxs)}\n")
-        for edge in valid_hedges:
-            f.write(" ".join(str(v) for v in edge) + "\n")
-
-    return v_map_inv
+from subgraph import write_hgr
+from selection import selection
 
 def algo(hg, nparts, filename):
     covered_vertices = set()
     removed_edges = set()
     solu = []
-
-    iteration = 0
     last_hmetis_covered = 0
     threshhold = int(0.05 * hg.nvtxs)
-    partitions = {}
+    iteration = 0
     while len(covered_vertices) <  hg.nvtxs:
 
         t = time.time()
         # use greedy if small enough
-        live_vtxs = [v for v in hg.vtxs if v not in covered_vertices]
-        """if len(live_vtxs) < 400:
+        live_count = hg.nvtxs - len(covered_vertices)
+        """if live_count < 400:
             greedy(hg, covered_vertices, removed_edges, solu)
 
             break"""
 
-        if not partitions or len(covered_vertices) - last_hmetis_covered >= threshhold:
+        # write subgraph only if last covered >= threshold
+        if iteration == 0 or len(covered_vertices) - last_hmetis_covered >= threshhold:
 
 
-            v_map_inv= write_hgr(hg, covered_vertices, removed_edges, filename, live_vtxs)
+            v_map_inv= write_hgr(hg, covered_vertices, removed_edges, filename)
             subprocess.run(f"./hmetis {filename} {nparts} 5 1 2 1 0 0 0", shell=True)
             last_hmetis_covered = len(covered_vertices)
 
@@ -86,39 +43,19 @@ def algo(hg, nparts, filename):
                     partitions[part] = set()
 
                 partitions[part].add(original_vtx)
+            print(f"number of partitions: {len(partitions)}")
+            for n in partitions:
+                print(f"partition {n}: {len(partitions[n])} vertices")
+
 
         #pick top-k
-        selection(hg, covered_vertices, removed_edges, solu, partitions)
-        """for n in partitions:
-            best_score = 0
-            best_edge = None
-            candidate_hedge = set()
-            for v in partitions[n]:
-                for hedge in hg.vtxs_dict[v]:
-                    if hedge not in removed_edges:
-                        candidate_hedge.add(hedge)
-
-            for hedge in candidate_hedge:
-                score = len(hg.hedges_dict[hedge].intersection(partitions[n]))
-                if score > best_score:
-                    best_score = score
-                    best_edge = hedge
-                else:
-                    continue
-
-            if best_edge is None:
-                continue
-
-            newly_coverd = hg.hedges_dict[best_edge] - covered_vertices
-            covered_vertices.update(newly_coverd)
-            removed_edges.add(best_edge)
-            solu.append(best_edge)"""
+        selection(hg, covered_vertices, removed_edges, solu, partitions, 2)
 
         iteration += 1
         print(f"iter{iteration}:covered = {len(covered_vertices)}, "
               f"removed_edges = {len(removed_edges)}, time = {time.time() - t:.2f}s")
 
-        if iteration == 2000:
+        if iteration == 10:
             break
 
     return len(removed_edges), len(covered_vertices)
