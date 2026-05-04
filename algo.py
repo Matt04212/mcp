@@ -57,7 +57,7 @@ def hmetis_mcp(hg, budget, filename, nparts=2, **kwargs):
         print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
 
     weighted_coverage = sum(hg.vtx_weights[v] for v in covered_vertices)
-    return (hg.nhedges, hg.nvtxs), weighted_coverage, list(removed_edges), write_time, partition_time
+    return (hg.nhedges, hg.nvtxs), weighted_coverage, covered_vertices, removed_edges, write_time, partition_time
 
 
 def hmetis_set_cover(hg, filename, nparts=2, **kwargs):
@@ -118,8 +118,7 @@ def hmetis_set_cover(hg, filename, nparts=2, **kwargs):
                 newly_covered = hg.hedges_dict[best_edge] - covered_vertices
                 if newly_covered:
                     covered_vertices.update(newly_covered)
-                    removed_edges.add(best_edge)  # bug here — should be best_edge
-
+                    removed_edges.add(best_edge)
         if len(removed_edges) == prev_len:
             break
 
@@ -127,7 +126,7 @@ def hmetis_set_cover(hg, filename, nparts=2, **kwargs):
         print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
 
     weighted_coverage = sum(hg.vtx_weights[v] for v in covered_vertices)
-    return (hg.nhedges, hg.nvtxs), weighted_coverage, list(removed_edges), write_time, partition_time
+    return (hg.nhedges, hg.nvtxs), weighted_coverage, covered_vertices, removed_edges, write_time, partition_time
 
 
 

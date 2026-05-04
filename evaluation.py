@@ -44,29 +44,25 @@ def run_single(hg, algo_func, filename, budget, **kwargs):
     total_time = time.time() - t
     return {
         'size': result[0],
-        'covered_vertices': result[1],
-        'solution': result[2],
+        'covered_vertices': result[2],
+        'solution': result[3],
         'time(s)': round(total_time, 4),
-        'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
-        'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
-        'selection_time(s)': round(result[5], 4) if len(result) > 5 else None,
+        'write_time(s)': round(result[4], 4) if len(result) > 4 else None,
+        'partition_time(s)': round(result[5], 4) if len(result) > 5 else None,
     }
 
 def run_single_set_cover(hg, algo_func, filename, **kwargs):
     t = time.time()
     result = algo_func(hg, filename=filename, **kwargs)  # no budget
     total_time = time.time() - t
-    covered = set()
-    for hedge in result[2]:
-        covered.update(hg.hedges_dict[hedge])
     return {
         'size': result[0],
-        'edges_used': len(result[2]),
-        'coverage_ratio': len(covered) / hg.nvtxs,
-        'solution': result[2],
+        'edges_used': len(result[3]),
+        'coverage_ratio': len(result[2]) / hg.nvtxs,
+        'solution': result[3],
         'time(s)': round(total_time, 4),
-        'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
-        'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
+        'write_time(s)': round(result[4], 4) if len(result) > 4 else None,
+        'partition_time(s)': round(result[5], 4) if len(result) > 5 else None,
     }
 
 def evaluate_mcp(algos, filename, size, distributions, n_runs, budget, **kwargs):
@@ -83,10 +79,7 @@ def evaluate_mcp(algos, filename, size, distributions, n_runs, budget, **kwargs)
 
                 for algo_name, algo_func in algos.items():
                     metrics = run_single(hg, algo_func, filename, budget=budget, **kwargs)
-                    covered = set()
-                    for hedge in metrics['solution']:
-                        covered.update(hg.hedges_dict[hedge])
-                    weighted_coverage = round(sum(hg.vtx_weights[v] for v in covered), 4)
+                    weighted_coverage = round(sum(hg.vtx_weights[v] for v in metrics['covered_vertices']), 4)
                     metrics['performance'] = round(weighted_coverage / o, 4)
                     metrics['is_optimal'] = weighted_coverage >= o - 1e-6
                     run_results[algo_name].append(metrics)

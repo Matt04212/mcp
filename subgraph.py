@@ -14,7 +14,7 @@ def write_hgr(hg, covered_vertices, removed_edges, filename):
             continue
         incident_live_edges = [e_map[e] for e in hg.vtxs_dict[vtx]
                                if e not in removed_edges]
-        if len(incident_live_edges) >= 0:  # only meaningful if connects 2+ edges
+        if len(incident_live_edges) >= 0:
             valid_hedges.append(incident_live_edges)
 
     with open(filename, 'w') as f:

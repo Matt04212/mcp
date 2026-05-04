@@ -10,7 +10,7 @@ class Hypergraph:
         self.hedges = list(range(1,nhedges+1))
         self.vtxs = list(range(1,nvtxs+1))
 
-        self.vtx_weights = {v: random.uniform(1, 1) for v in self.vtxs}
+        self.vtx_weights = {v: random.uniform(1, 1) for v in self.vtxs} # adjust later
 
     def generate(self, distribution='exponential', **kwargs):
         if distribution == 'exponential':
