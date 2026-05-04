@@ -4,64 +4,130 @@ import numpy as np
 from subgraph import write_hgr
 from selection import selection
 
-def algo(hg, nparts, filename):
-    covered_vertices = set()
+
+def hmetis_mcp(hg, budget, filename, nparts=2, **kwargs):
     removed_edges = set()
-    solu = []
-    last_hmetis_covered = 0
-    threshhold = int(0.05 * hg.nvtxs)
+    covered_vertices = set()
     iteration = 0
-    while len(covered_vertices) <  hg.nvtxs:
+    write_time = 0
+    partition_time = 0
 
-        t = time.time()
-        # use greedy if small enough
-        live_count = hg.nvtxs - len(covered_vertices)
-        """if live_count < 400:
-            greedy(hg, covered_vertices, removed_edges, solu)
+    while len(removed_edges) < budget:
+        w = time.time()
+        e_map_inv = write_hgr(hg, covered_vertices, removed_edges, filename)
+        write_time += time.time() - w
 
-            break"""
+        p = time.time()
+        subprocess.run(f"./hmetis {filename} {nparts} 5 1 1 1 1 0 0",
+                      shell=True)
+        partition_time += time.time() - p
 
-        # write subgraph only if last covered >= threshold
-        if iteration == 0 or len(covered_vertices) - last_hmetis_covered >= threshhold:
+        with open(f"{filename}.part.{nparts}", "r") as f:
+            line = f.read().splitlines()
 
-
-            v_map_inv= write_hgr(hg, covered_vertices, removed_edges, filename)
-            subprocess.run(f"./hmetis {filename} {nparts} 5 1 2 1 0 0 0", shell=True)
-            last_hmetis_covered = len(covered_vertices)
-
-
-            with open(f"{filename}.part.{nparts}", "r") as f:
-                line = f.read().splitlines()
-
-            partitions = {}
-            for vtx, part in enumerate(line, start=1):
-                #print(f"partition file lines: {len(line)}, v_map_inv size: {len(v_map_inv)}")
-                original_vtx = v_map_inv[vtx]
-                part = int(part)
-
-                if part not in partitions:
-                    partitions[part] = set()
-
-                partitions[part].add(original_vtx)
-            print(f"number of partitions: {len(partitions)}")
-            for n in partitions:
-                print(f"partition {n}: {len(partitions[n])} vertices")
-
-
-        #pick top-k
-        selection(hg, covered_vertices, removed_edges, solu, partitions, 2)
-
-        iteration += 1
-        print(f"iter{iteration}:covered = {len(covered_vertices)}, "
-              f"removed_edges = {len(removed_edges)}, time = {time.time() - t:.2f}s")
-
-        if iteration == 10:
+        if len(line) != len(e_map_inv):
             break
 
-    return len(removed_edges), len(covered_vertices)
+        edge_partitions = {}
+        for edge, part in enumerate(line, start=1):
+            original_edge = e_map_inv[edge]
+            part = int(part)
+            edge_partitions.setdefault(part, set()).add(original_edge)
+
+        prev_len = len(removed_edges)
+        for n, part_edges in edge_partitions.items():
+            if len(removed_edges) >= budget:
+                break
+            best_edge = max(
+                (e for e in part_edges if e not in removed_edges),
+                key=lambda e: sum(hg.vtx_weights[v]
+                                  for v in hg.hedges_dict[e] - covered_vertices),
+                default=None
+            )
+            if best_edge is not None:
+                newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+                if newly_covered:
+                    covered_vertices.update(newly_covered)
+                    removed_edges.add(best_edge)
+
+        if len(removed_edges) == prev_len:
+            break
+
+        iteration += 1
+        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
+
+    weighted_coverage = sum(hg.vtx_weights[v] for v in covered_vertices)
+    return (hg.nhedges, hg.nvtxs), weighted_coverage, list(removed_edges), write_time, partition_time
 
 
+def hmetis_set_cover(hg, filename, nparts=2, **kwargs):
+    removed_edges = set()
+    covered_vertices = set()
+    iteration = 0
+    write_time = 0
+    partition_time = 0
 
+    while len(covered_vertices) < hg.nvtxs:
+
+        live_count = hg.nvtxs - len(covered_vertices)
+        """if live_count < 3000:
+            greedy(hg, covered_vertices, removed_edges)
+
+            break"""
+        w = time.time()
+        e_map_inv = write_hgr(hg, covered_vertices, removed_edges, filename)
+        write_time += time.time() - w
+
+        p = time.time()
+        subprocess.run(f"./hmetis {filename} {nparts} 5 1 2 1 0 0 0",
+                      shell=True)
+        partition_time += time.time() - p
+
+        with open(f"{filename}.part.{nparts}", "r") as f:
+            line = f.read().splitlines()
+
+        if len(line) != len(e_map_inv):
+            # handle remaining uncovered vertices
+            for v in hg.vtxs:
+                if v not in covered_vertices:
+                    for hedge in hg.vtxs_dict[v]:
+                        if hedge not in removed_edges:
+                            newly_covered = hg.hedges_dict[hedge] - covered_vertices
+                            covered_vertices.update(newly_covered)
+                            removed_edges.add(hedge)
+                            break
+            break
+
+        edge_partitions = {}
+        for edge, part in enumerate(line, start=1):
+            original_edge = e_map_inv[edge]
+            part = int(part)
+            edge_partitions.setdefault(part, set()).add(original_edge)
+
+        prev_len = len(removed_edges)
+        for n, part_edges in edge_partitions.items():
+            if len(covered_vertices) >= hg.nvtxs:
+                break
+            best_edge = max(
+                (e for e in part_edges if e not in removed_edges),
+                key=lambda e: sum(hg.vtx_weights[v]
+                                  for v in hg.hedges_dict[e] - covered_vertices),
+                default=None
+            )
+            if best_edge is not None:
+                newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+                if newly_covered:
+                    covered_vertices.update(newly_covered)
+                    removed_edges.add(best_edge)  # bug here — should be best_edge
+
+        if len(removed_edges) == prev_len:
+            break
+
+        iteration += 1
+        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
+
+    weighted_coverage = sum(hg.vtx_weights[v] for v in covered_vertices)
+    return (hg.nhedges, hg.nvtxs), weighted_coverage, list(removed_edges), write_time, partition_time
 
 
 

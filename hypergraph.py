@@ -10,9 +10,11 @@ class Hypergraph:
         self.hedges = list(range(1,nhedges+1))
         self.vtxs = list(range(1,nvtxs+1))
 
+        self.vtx_weights = {v: random.uniform(1, 1) for v in self.vtxs}
+
     def generate(self, distribution='exponential', **kwargs):
         if distribution == 'exponential':
-            scale = kwargs.get('scale', 40)
+            scale = kwargs.get('scale', 20)
             hedge_size = np.ceil(np.random.exponential(scale=scale, size=self.nhedges)).astype(int)
 
         elif distribution == 'uniform':
@@ -21,11 +23,66 @@ class Hypergraph:
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'gamma':
-            hedge_size = np.random.gamma(5, 70, size=self.nhedges).astype(int)
+            hedge_size = np.random.gamma(4, 40, size=self.nhedges).astype(int)
 
 
-        elif distribution == 'spatial':
-            rmax = kwargs.get('rmax', 0.02)
+
+        elif distribution == 'distance':
+            rmax_small = kwargs.get('rmax_small', 0.03)
+            rmax_medium = kwargs.get('rmax_medium', 0.07)
+            rmax_large = kwargs.get('rmax_large', 0.10)
+
+            # proportion of each size - many small, some medium, few large
+            prop_small = kwargs.get('prop_small', 0.68)
+            prop_medium = kwargs.get('prop_medium', 0.22)
+            prop_large = kwargs.get('prop_large', 0.10)
+
+            # generate coordinates for all vertices
+            elem_x = np.random.uniform(0, 1, self.nvtxs)
+            elem_y = np.random.uniform(0, 1, self.nvtxs)
+
+            # place each facility at a random vertex location
+            facility_idx = np.random.choice(self.nvtxs, self.nhedges, replace=False)
+
+            # assign rmax to each facility based on proportions
+            n_small = int(self.nhedges * prop_small)
+            n_medium = int(self.nhedges * prop_medium)
+            n_large = self.nhedges - n_small - n_medium
+
+            rmax_list = (
+                    [rmax_small] * n_small +
+                    [rmax_medium] * n_medium +
+                    [rmax_large] * n_large
+            )
+
+            random.shuffle(rmax_list)  # shuffle so large ones aren't all at end
+
+            # reset dicts
+            self.hedges_dict = {}
+            self.vtxs_dict = {vtx: set() for vtx in self.vtxs}
+
+            for hedge, fidx, rmax in zip(self.hedges, facility_idx, rmax_list):
+                fx, fy = elem_x[fidx], elem_y[fidx]
+                dists = np.sqrt((elem_x - fx) ** 2 + (elem_y - fy) ** 2)
+                covered = set(np.where(dists <= rmax)[0] + 1)
+                self.hedges_dict[hedge] = covered
+                for vtx in covered:
+                    self.vtxs_dict[vtx].add(hedge)
+
+            # handle isolated vertices - assign to nearest facility
+            for vtx in self.vtxs_dict:
+                if not self.vtxs_dict[vtx]:
+                    vx, vy = elem_x[vtx - 1], elem_y[vtx - 1]
+                    dists = np.sqrt((elem_x[facility_idx] - vx) ** 2 +
+                                    (elem_y[facility_idx] - vy) ** 2)
+                    nearest_hedge = self.hedges[np.argmin(dists)]
+                    self.hedges_dict[nearest_hedge].add(vtx)
+                    self.vtxs_dict[vtx].add(nearest_hedge)
+
+            return
+
+        elif distribution == 'distance2':
+            rmax = kwargs.get('rmax', 0.1)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
@@ -51,18 +108,14 @@ class Hypergraph:
             for vtx in self.vtxs_dict:
                 if not self.vtxs_dict[vtx]:
                     vx, vy = elem_x[vtx - 1], elem_y[vtx - 1]
-
                     dists = np.sqrt((elem_x[facility_idx] - vx) ** 2 +
-
                                     (elem_y[facility_idx] - vy) ** 2)
 
                     nearest_hedge = self.hedges[np.argmin(dists)]
-
                     self.hedges_dict[nearest_hedge].add(vtx)
-
                     self.vtxs_dict[vtx].add(nearest_hedge)
 
-            return  # skip the rest of generate()
+            return
 
         # clip to valid range
         hedge_size = np.clip(hedge_size, 1, self.nvtxs)

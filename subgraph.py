@@ -1,26 +1,25 @@
 def write_hgr(hg, covered_vertices, removed_edges, filename):
-    # filter to vertices that appear in at least one live edge
-    live_vtxs = [v for v in hg.vtxs
-                 if v not in covered_vertices
-                 and any(e not in removed_edges for e in hg.vtxs_dict[v])]
-    # orginial -> hmetis id
-    v_map = {v: i + 1 for i, v in enumerate(live_vtxs)}
-    # inverse
-    v_map_inv = {i + 1: v for i, v in enumerate(live_vtxs)}
+    # edges become vertices, vertices become hyperedges
+    live_edges = [e for e in hg.hedges if e not in removed_edges]
 
+    # map original edge ID to hMETIS vertex ID (1-indexed)
+    e_map = {e: i + 1 for i, e in enumerate(live_edges)}
+    e_map_inv = {i + 1: e for i, e in enumerate(live_edges)}
+
+    # each original vertex becomes a hyperedge
+    # connecting all live edges that contain it
     valid_hedges = []
-    for hedge in hg.hedges_dict:
-        if hedge in removed_edges:
+    for vtx in hg.vtxs:
+        if vtx in covered_vertices:  # vertex already covered, skip
             continue
-        live_vtxs_in_edge = [v_map[v] for v in hg.hedges_dict[hedge]
-                             if v not in covered_vertices]
-        if not live_vtxs_in_edge:
-            continue
-        valid_hedges.append(live_vtxs_in_edge)
+        incident_live_edges = [e_map[e] for e in hg.vtxs_dict[vtx]
+                               if e not in removed_edges]
+        if len(incident_live_edges) >= 0:  # only meaningful if connects 2+ edges
+            valid_hedges.append(incident_live_edges)
 
     with open(filename, 'w') as f:
-        f.write(f"{len(valid_hedges)} {len(live_vtxs)}\n")
-        for edge in valid_hedges:
-            f.write(" ".join(str(v) for v in edge) + "\n")
+        f.write(f"{len(valid_hedges)} {len(live_edges)}\n")
+        for hedge in valid_hedges:
+            f.write(" ".join(str(v) for v in hedge) + "\n")
 
-    return v_map_inv
+    return e_map_inv
