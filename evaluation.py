@@ -28,7 +28,6 @@ def _average_metrics_set_cover(runs, nhedges, nvtxs, dist, algo_name, n_runs):
         'time(s)': round(np.mean([r['time(s)'] for r in runs]), 4),
         'edges_used': round(np.mean([r['edges_used'] for r in runs]), 2),
         'std_edges_used': round(np.std([r['edges_used'] for r in runs]), 4),
-        'coverage_ratio': round(np.mean([r['coverage_ratio'] for r in runs]), 4),
         'write_time(s)': round(np.mean([r['write_time(s)'] for r in runs
                                if r['write_time(s)'] is not None]), 4)
                          if any(r['write_time(s)'] is not None for r in runs) else None,
@@ -44,11 +43,11 @@ def run_single(hg, algo_func, filename, budget, **kwargs):
     total_time = time.time() - t
     return {
         'size': result[0],
-        'covered_vertices': result[2],
-        'solution': result[3],
+        'covered_vertices': result[1],
+        'solution': result[2],
         'time(s)': round(total_time, 4),
-        'write_time(s)': round(result[4], 4) if len(result) > 4 else None,
-        'partition_time(s)': round(result[5], 4) if len(result) > 5 else None,
+        'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
+        'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
     }
 
 def run_single_set_cover(hg, algo_func, filename, **kwargs):
@@ -57,12 +56,11 @@ def run_single_set_cover(hg, algo_func, filename, **kwargs):
     total_time = time.time() - t
     return {
         'size': result[0],
-        'edges_used': len(result[3]),
-        'coverage_ratio': len(result[2]) / hg.nvtxs,
-        'solution': result[3],
+        'edges_used': len(result[2]),
+        'solution': result[2],
         'time(s)': round(total_time, 4),
-        'write_time(s)': round(result[4], 4) if len(result) > 4 else None,
-        'partition_time(s)': round(result[5], 4) if len(result) > 5 else None,
+        'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
+        'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
     }
 
 def evaluate_mcp(algos, filename, size, distributions, n_runs, budget, **kwargs):

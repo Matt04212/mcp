@@ -14,28 +14,26 @@ class Hypergraph:
 
     def generate(self, distribution='exponential', **kwargs):
         if distribution == 'exponential':
-            scale = kwargs.get('scale', 20)
+            scale = kwargs.get('scale', 100)
             hedge_size = np.ceil(np.random.exponential(scale=scale, size=self.nhedges)).astype(int)
 
         elif distribution == 'uniform':
             low = kwargs.get('low', 10)
-            high = kwargs.get('high', 500)
+            high = kwargs.get('high', 250)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'gamma':
             hedge_size = np.random.gamma(4, 40, size=self.nhedges).astype(int)
 
-
-
         elif distribution == 'distance':
-            rmax_small = kwargs.get('rmax_small', 0.03)
-            rmax_medium = kwargs.get('rmax_medium', 0.07)
-            rmax_large = kwargs.get('rmax_large', 0.10)
+            rmax_small = kwargs.get('rmax_small', 0.02)
+            rmax_medium = kwargs.get('rmax_medium', 0.04)
+            rmax_large = kwargs.get('rmax_large', 0.06)
 
             # proportion of each size - many small, some medium, few large
-            prop_small = kwargs.get('prop_small', 0.68)
-            prop_medium = kwargs.get('prop_medium', 0.22)
-            prop_large = kwargs.get('prop_large', 0.10)
+            prop_small = kwargs.get('prop_small', 0.75)
+            prop_medium = kwargs.get('prop_medium', 0.20)
+            prop_large = kwargs.get('prop_large', 0.05)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
@@ -82,7 +80,7 @@ class Hypergraph:
             return
 
         elif distribution == 'distance2':
-            rmax = kwargs.get('rmax', 0.1)
+            rmax = kwargs.get('rmax', 0.01)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
