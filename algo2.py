@@ -118,7 +118,7 @@ def hmetis_set_cover2(hg, filename, nparts=2, **kwargs):
         with open(f"{filename}.part.{nparts}") as f:
             line = f.read().splitlines()
 
-        if len(line) != len(e_map_inv):
+        """if len(line) != len(e_map_inv):
             # hMETIS couldn't partition — greedily cover remaining vertices
             for v in hg.vtxs:
                 if v in covered_vertices:
@@ -132,7 +132,7 @@ def hmetis_set_cover2(hg, filename, nparts=2, **kwargs):
                         _update_scores(hg, scores, newly_covered, removed_edges)
                         writer.update(hedge, newly_covered)
                         break
-            break
+            break"""
 
         parse = time.time()
         partitions = _parse_partitions(line, e_map_inv)
@@ -161,7 +161,7 @@ def hmetis_set_cover2(hg, filename, nparts=2, **kwargs):
         print(f"iter={iteration}, "
               f"covered={len(covered_vertices)}, "
               f"removed={len(removed_edges)},"
-              f"parse_time={parse_time}, select_time={select_time}"al)
+              f"parse_time={parse_time}, select_time={select_time}")
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time
 

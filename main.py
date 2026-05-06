@@ -1,17 +1,18 @@
-from algo import hmetis_mcp, hmetis_set_cover
-from greedy import pure_greedy_mcp, pure_greedy_set_cover
+from algo import hmetis_set_cover, pure_greedy_set_cover
+from greedy import pure_greedy_mcp
 from hypergraph import Hypergraph
 from analysis import analyze_graph, plot_graph
 from evaluation import evaluate_mcp, evaluate_set_cover
 import pandas as pd
 import numpy as np
 from optimal import optimal_solu
+from algo2 import hmetis_set_cover2
 
 
 distributions1 = [
     #'exponential',
-    #'distance',
-    'distance2'
+    #'dis',
+    'dis2'
 ]
 
 """size1 = [
@@ -38,22 +39,22 @@ df1 = pd.DataFrame(results1)
 print(df1.to_string(index=False))"""
 
 
-
 distributions2 = [
     #'exponential',
     'gamma',
     #'uniform',
-    #'distance',
-    #'distance2'
+    #'dis',
+    #'dis2'
 ]
 
 size2 = [
-    (75000, 150000)
+    (5000, 10000)
 ]
 
 
 algos2 = {
-    'hmetis': hmetis_set_cover,
+    #'hmetis': hmetis_set_cover,
+    'h2': hmetis_set_cover,
     'pure_greedy': pure_greedy_set_cover
 }
 

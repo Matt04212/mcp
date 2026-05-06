@@ -11,7 +11,6 @@ def analyze_graph(hg, dist):
         #edge stat
         'mean_edge_size': float('%.3f'% np.mean(sizes)),
         'std_edge_size': float('%.3f'% np.std(sizes)),
-        'var_edge_size': float('%.3f'% np.var(sizes)),
         'max_edge_size': int(np.max(sizes)),
         'min_edge_size': int(np.min(sizes)),
         'median_edge_size': float('%.3f'% np.median(sizes)),

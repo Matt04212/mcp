@@ -48,6 +48,7 @@ def run_single(hg, algo_func, filename, budget, **kwargs):
         'time(s)': round(total_time, 4),
         'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
         'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
+        'stage' : result[5]
     }
 
 def run_single_set_cover(hg, algo_func, filename, **kwargs):
@@ -59,8 +60,9 @@ def run_single_set_cover(hg, algo_func, filename, **kwargs):
         'edges_used': len(result[2]),
         'solution': result[2],
         'time(s)': round(total_time, 4),
-        'write_time(s)': round(result[3], 4) if len(result) > 3 else None,
-        'partition_time(s)': round(result[4], 4) if len(result) > 4 else None,
+        'write_time(s)': round(result[3], 4) if result[3] else None,
+        'partition_time(s)': round(result[4], 4) if result[4] else None,
+        'stage': result[5]
     }
 
 def evaluate_mcp(algos, filename, size, distributions, n_runs, budget, **kwargs):
