@@ -10,7 +10,7 @@ class Hypergraph:
         self.hedges = list(range(1,nhedges+1))
         self.vtxs = list(range(1,nvtxs+1))
 
-        self.vtx_weights = {v: random.uniform(1, 10) for v in self.vtxs} # adjust later
+        self.vtx_weights = {v: random.uniform(1, 1) for v in self.vtxs} # adjust later
 
     def generate(self, distribution='exponential', **kwargs):
         if distribution == 'exponential':
@@ -18,8 +18,8 @@ class Hypergraph:
             hedge_size = np.ceil(np.random.exponential(scale=scale, size=self.nhedges)).astype(int)
 
         elif distribution == 'uniform':
-            low = kwargs.get('low', 5)
-            high = kwargs.get('high', 30)
+            low = kwargs.get('low', 1)
+            high = kwargs.get('high', 750)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'gamma':
@@ -38,12 +38,12 @@ class Hypergraph:
         elif distribution == 'dis':
             rmax_small = kwargs.get('rmax_small', 0.02)
             rmax_medium = kwargs.get('rmax_medium', 0.04)
-            rmax_large = kwargs.get('rmax_large', 0.055)
+            rmax_large = kwargs.get('rmax_large', 0.06)
 
             # proportion of each size - many small, some medium, few large
-            prop_small = kwargs.get('prop_small', 0.55)
-            prop_medium = kwargs.get('prop_medium', 0.32)
-            prop_large = kwargs.get('prop_large', 0.13)
+            prop_small = kwargs.get('prop_small', 0.60)
+            prop_medium = kwargs.get('prop_medium', 0.30)
+            prop_large = kwargs.get('prop_large', 0.10)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
@@ -148,11 +148,11 @@ class Hypergraph:
 
     def output(self, filename):
         with open(filename, 'w') as f:
-            f.write(f"{self.nhedges} {self.nvtxs}\n")
+            f.write(f"{self.nvtxs} {self.nhedges}\n")
 
-            for hedge in self.hedges_dict:
-                vtxs = self.hedges_dict[hedge]
-                line = " ".join(str(n) for n in vtxs)
+            for vtxs in self.vtxs_dict:
+                hedges = self.vtxs_dict[vtxs]
+                line = " ".join(str(n) for n in hedges)
                 f.write(line + "\n")
 
 

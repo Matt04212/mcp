@@ -75,19 +75,29 @@ def _greedy_fallback(hg, covered_vertices, removed_edges, scores):
             _update_scores(hg, scores, newly_covered, removed_edges)
 
 
-def _run_hmetis(filename, nparts, ub_flag, timeout=120):
-    """
-    Run hMETIS with a timeout guard.
-    Returns True on success, False if it timed out.
-    ub_flag: 1 for MCP mode, 2 for set-cover mode.
-    """
-    cmd = f"./hmetis {filename} {nparts} 5 1 {ub_flag} 1 0 0 0"
+def _run_hmetis(filename, nparts, timeout=120):
+    import os
+    part_file = f"{filename}.part.{nparts}"
+
+    # remove stale partition file so we can detect if hMETIS fails to write
+    if os.path.exists(part_file):
+        os.remove(part_file)
+
     try:
-        subprocess.run(cmd, shell=True, timeout=timeout, capture_output=True)
-        return True
+        subprocess.run(
+            f"./hmetis {filename} {nparts} 5 1 5 1 0 0 0",
+            shell=True, timeout=timeout, capture_output=True
+        )
     except subprocess.TimeoutExpired:
-        print(f"  [warn] hMETIS timed out after {timeout}s — switching to greedy")
+        print(f"  [warn] hMETIS timed out after {timeout}s")
         return False
+
+    # check if hMETIS actually wrote the file
+    if not os.path.exists(part_file):
+        print(f"  [warn] hMETIS did not produce partition file — likely crashed")
+        return False
+
+    return True
 
 
 def _select_and_update(hg, partitions, covered_vertices, removed_edges,
@@ -188,7 +198,7 @@ def hmetis_mcp(hg, budget, filename, nparts=2, timeout=120, **kwargs):
         write_time += time.time() - w
 
         p  = time.time()
-        ok = _run_hmetis(filename, nparts, ub_flag=1, timeout=timeout)
+        ok = _run_hmetis(filename, nparts, timeout=timeout)
         partition_time += time.time() - p
         if not ok:
             break
@@ -198,19 +208,25 @@ def hmetis_mcp(hg, budget, filename, nparts=2, timeout=120, **kwargs):
         if len(line) != len(e_map_inv):
             break
 
+        p2 = time.time()
         partitions = _parse_partitions(line, e_map_inv)
-        prev_len   = len(removed_edges)
+        parse_time = time.time() - p2
 
+        prev_len = len(removed_edges)
+
+        s = time.time()
         _select_and_update(
             hg, partitions, covered_vertices, removed_edges, scores, writer,
             stop_condition=lambda: len(removed_edges) >= budget
         )
+        select_time = time.time() - s
 
         if len(removed_edges) == prev_len:
             break
 
         iteration += 1
-        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
+        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}, "
+              f"parse={parse_time:.4f}s, select={select_time:.4f}s")
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time
 
@@ -266,8 +282,9 @@ def hmetis_set_cover(hg, filename, nparts=2, timeout=120, **kwargs):
         write_time += time.time() - w
 
         p  = time.time()
-        ok = _run_hmetis(filename, nparts, ub_flag=2, timeout=timeout)
+        ok = _run_hmetis(filename, nparts, timeout=timeout)
         partition_time += time.time() - p
+        p_time = time.time() - p
 
         if not ok:
             _greedy_fallback(hg, covered_vertices, removed_edges, scores)
@@ -278,27 +295,27 @@ def hmetis_set_cover(hg, filename, nparts=2, timeout=120, **kwargs):
             line = f.read().splitlines()
 
         if len(line) != len(e_map_inv):
-            _greedy_fallback(hg, covered_vertices, removed_edges, scores)
-            tracker.check(covered_vertices, removed_edges)
+            print(f"  missing: {len(e_map_inv) - len(line)}")
             break
 
+        p2 = time.time()
         partitions = _parse_partitions(line, e_map_inv)
-        prev_len   = len(removed_edges)
+        parse_time = time.time() - p2
 
+        prev_len = len(removed_edges)
+
+        s = time.time()
         _select_and_update(
             hg, partitions, covered_vertices, removed_edges, scores, writer,
             stop_condition=lambda: len(covered_vertices) >= hg.nvtxs
         )
+        select_time = time.time() - s
 
         tracker.check(covered_vertices, removed_edges)
 
-        if len(removed_edges) == prev_len:
-            _greedy_fallback(hg, covered_vertices, removed_edges, scores)
-            tracker.check(covered_vertices, removed_edges)
-            break
-
         iteration += 1
-        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}")
+        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}, "
+              f"parse={parse_time:.4f}s, select={select_time:.4f}s, partition={p_time:.4f}s")
 
     final_time   = round(time.time() - start_time, 4)
     final_edges  = len(removed_edges)
@@ -336,11 +353,3 @@ def pure_greedy_set_cover(hg, filename=None, **kwargs):
     stages      = tracker.result(final_edges, final_time)
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
-
-
-
-
-
-
-
-

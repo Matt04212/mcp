@@ -1,6 +1,5 @@
 import io
 
-
 class HgrWriter:
     """
     Incremental hMETIS file writer.
