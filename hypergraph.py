@@ -1,6 +1,6 @@
 import numpy as np
 import random
-from scipy.stats import powerlaw
+from scipy.stats import beta as beta_dist
 
 class Hypergraph:
     def __init__(self, nhedges, nvtxs):
@@ -12,33 +12,40 @@ class Hypergraph:
 
         self.vtx_weights = {v: random.uniform(1, 1) for v in self.vtxs} # adjust later
 
-    def generate(self, distribution='exponential', **kwargs):
-        if distribution == 'exponential':
-            scale = kwargs.get('scale', 20)
-            hedge_size = np.ceil(np.random.exponential(scale=scale, size=self.nhedges)).astype(int)
+    def generate(self, distribution='gamma', **kwargs):
+        # left-skewed (FrontLoad) — most edges small
+        if distribution == 'beta_right':
+            max_size = kwargs.get('max_size', 500)
+            raw = beta_dist.rvs(2, 5, size=self.nhedges)
+            hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
+            # mean = 2/10 * 500 = 100
+
+        # bell-shaped (symmetric) — replaces uniform
+        elif distribution == 'beta_bell':
+            max_size = kwargs.get('max_size', 500)
+            raw = beta_dist.rvs(5, 5, size=self.nhedges)
+            hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
+            # mean = 5/10 * 500 = 250
+
+        # right-skewed (BackLoad) — most edges large
+        elif distribution == 'beta_left':
+            max_size = kwargs.get('max_size', 500)
+            raw = beta_dist.rvs(5, 2, size=self.nhedges)
+            hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
+            # mean = 8/10 * 500 = 400
 
         elif distribution == 'uniform':
             low = kwargs.get('low', 1)
-            high = kwargs.get('high', 750)
+            high = kwargs.get('high', 500)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'gamma':
             hedge_size = np.random.gamma(4, 40, size=self.nhedges).astype(int)
 
-        elif distribution == 'reverse_gamma':
-            # mirror of gamma: peak near the top end, tail toward small sizes
-            # generate gamma then flip: max_val - sample
-            shape = kwargs.get('shape', 4)
-            scale = kwargs.get('scale', 40)
-            raw = np.random.gamma(shape, scale, size=self.nhedges)
-            # mirror around the gamma mean*2 so peak lands near high end
-
-            hedge_size = (raw.max() - raw + 1).astype(int)
-
         elif distribution == 'dis':
-            rmax_small = kwargs.get('rmax_small', 0.02)
-            rmax_medium = kwargs.get('rmax_medium', 0.04)
-            rmax_large = kwargs.get('rmax_large', 0.06)
+            rmax_small = kwargs.get('rmax_small', 0.05)
+            rmax_medium = kwargs.get('rmax_medium', 0.01)
+            rmax_large = kwargs.get('rmax_large', 0.015)
 
             # proportion of each size - many small, some medium, few large
             prop_small = kwargs.get('prop_small', 0.60)
@@ -90,7 +97,7 @@ class Hypergraph:
             return
 
         elif distribution == 'dis2':
-            rmax = kwargs.get('rmax', 0.1)
+            rmax = kwargs.get('rmax', 0.004)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
