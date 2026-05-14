@@ -20,5 +20,5 @@ def optimal_solu(hg, budget):
 
     prob.solve(pulp.PULP_CBC_CMD(msg=False))
 
-    optimal_coverage = round(pulp.value(prob.objective), 4)
+    optimal_coverage = round(pulp.value(prob.objective), 6)
     return optimal_coverage

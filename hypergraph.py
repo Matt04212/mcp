@@ -39,13 +39,10 @@ class Hypergraph:
             high = kwargs.get('high', 500)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
-        elif distribution == 'gamma':
-            hedge_size = np.random.gamma(4, 40, size=self.nhedges).astype(int)
-
         elif distribution == 'dis':
             rmax_small = kwargs.get('rmax_small', 0.05)
-            rmax_medium = kwargs.get('rmax_medium', 0.01)
-            rmax_large = kwargs.get('rmax_large', 0.015)
+            rmax_medium = kwargs.get('rmax_medium', 0.1)
+            rmax_large = kwargs.get('rmax_large', 0.2)
 
             # proportion of each size - many small, some medium, few large
             prop_small = kwargs.get('prop_small', 0.60)
@@ -97,7 +94,7 @@ class Hypergraph:
             return
 
         elif distribution == 'dis2':
-            rmax = kwargs.get('rmax', 0.004)
+            rmax = kwargs.get('rmax', 0.1)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)

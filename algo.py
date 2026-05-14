@@ -85,7 +85,7 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         subprocess.run(
-            f"./hmetis {filename} {nparts} 5 1 5 2 3 0 0",
+            f"./hmetis {filename} {nparts} 5 2 5 2 3 0 0",
             shell=True, timeout=timeout, capture_output=True
         )
     except subprocess.TimeoutExpired:
@@ -228,8 +228,8 @@ class _StageTracker:
 #  MCP
 # ─────────────────────────────────────────────
 
-def hmetis_mcp(hg, budget, filename, nparts=64, timeout=120,
-               nparts_mid=32, nparts_late=16, **kwargs):
+def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
+               nparts_mid=None, nparts_late=None, **kwargs):
     """
     nparts       — partitions for early stage  (0        -> budget/3)
     nparts_mid   — partitions for mid stage    (budget/3 -> 2*budget/3), defaults to nparts
@@ -311,7 +311,7 @@ def hmetis_mcp(hg, budget, filename, nparts=64, timeout=120,
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
 
-def hmetis_mcp_early(hg, budget, filename, nparts=64, timeout=120, **kwargs):
+def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
     """
     Phase 1 (0 -> budget/3)        : hMetis-guided selection
     Phase 2 (budget/3 -> budget)   : pure greedy fallback
@@ -327,10 +327,10 @@ def hmetis_mcp_early(hg, budget, filename, nparts=64, timeout=120, **kwargs):
     writer  = HgrWriter(hg)
     tracker = _StageTrackerMCP(budget, start_time)
 
-    first_third = budget // 3
+    two_third = 2 * budget // 3
 
     # ── Phase 1: hMetis ──────────────────────────────────────────────────────
-    while len(removed_edges) < first_third:
+    while len(removed_edges) < two_third:
         if (hg.nhedges - len(removed_edges)) < nparts:
             break
 
@@ -651,3 +651,15 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
     final_edges = len(removed_edges)
     stages      = tracker.result(final_edges, final_time)
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
+
+def _compute_coverage(hg, removed_edges):
+    covered_vertices = set()
+    for e in removed_edges:
+        covered_vertices.update(hg.hedges_dict[e])
+    return covered_vertices
+
+
+def _coverage_weight(hg, removed_edges):
+    covered = _compute_coverage(hg, removed_edges)
+    return sum(hg.vtx_weights[v] for v in covered)
+

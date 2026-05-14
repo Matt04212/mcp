@@ -51,6 +51,20 @@ def _average_metrics(runs, nhedges, nvtxs, dist, algo_name, n_runs):
 
     return result
 
+def _average_metrics_optimal(runs, nhedges, nvtxs, dist, algo_name, n_runs):
+    """Aggregation for MCP runs."""
+    return {
+        'size':             (nhedges, nvtxs),
+        'distribution':     dist,
+        'algo_name':        algo_name,
+        'time(s)':          _safe_mean(runs, 'time(s)'),
+        'fraction_optimal': round(sum(r['is_optimal'] for r in runs) / n_runs, 4),
+        'performance':      _safe_mean(runs, 'performance'),
+        'std_performance':  _safe_std(runs,  'performance'),
+        'write_time(s)':    _safe_mean(runs, 'write_time(s)'),
+        'partition_time(s)':_safe_mean(runs, 'partition_time(s)'),
+    }
+
 
 def _average_metrics_set_cover(runs, nhedges, nvtxs, dist, algo_name, n_runs):
     """
@@ -85,6 +99,8 @@ def _average_metrics_set_cover(runs, nhedges, nvtxs, dist, algo_name, n_runs):
         result[f'std_{k}'] = _safe_std(runs,  k)
 
     return result
+
+
 
 
 # ─────────────────────────────────────────────
@@ -144,8 +160,6 @@ def evaluate_mcp(algos, filename, size, distributions, n_runs, budget_ratio, **k
                 hg.generate(distribution=dist)
                 hg.output('original.hgr')
 
-                o = optimal_solu(hg, budget=budget)
-
                 for algo_name, algo_func in algos.items():
                     metrics = run_single(hg, algo_func, filename, budget=budget, **kwargs)
                     weighted_coverage = round(
@@ -160,6 +174,40 @@ def evaluate_mcp(algos, filename, size, distributions, n_runs, budget_ratio, **k
                 runs = run_results[algo_name]
                 all_results.append(
                     _average_metrics(runs, nhedges, nvtxs, dist, algo_name, n_runs)
+                )
+
+    return all_results
+
+def evaluate_optimal(algos, filename, size, distributions, n_runs, budget_ratio, **kwargs):
+    """Maximum Coverage Problem — fixed budget, maximize coverage."""
+    all_results = []
+    for nhedges, nvtxs in size:
+        budget = int(budget_ratio * nhedges)
+        for dist in distributions:
+            run_results = {algo_name: [] for algo_name in algos}
+
+            for run in range(n_runs):
+                hg = Hypergraph(nhedges, nvtxs)
+                hg.generate(distribution=dist)
+                hg.output('original.hgr')
+
+                o = optimal_solu(hg, budget=budget)
+
+                for algo_name, algo_func in algos.items():
+                    metrics = run_single(hg, algo_func, filename, budget=budget, **kwargs)
+                    weighted_coverage = round(
+                        sum(hg.vtx_weights[v] for v in metrics['covered_vertices']), 6
+                    )
+                    metrics['performance'] = round(weighted_coverage/o, 4)
+                    metrics['is_optimal'] = weighted_coverage >= o
+                    run_results[algo_name].append(metrics)
+
+                print(f"  [{dist} {nhedges},{nvtxs}] run {run+1}/{n_runs} done")
+
+            for algo_name in algos:
+                runs = run_results[algo_name]
+                all_results.append(
+                    _average_metrics_optimal(runs, nhedges, nvtxs, dist, algo_name, n_runs)
                 )
 
     return all_results
