@@ -228,7 +228,7 @@ class _StageTracker:
 #  MCP
 # ─────────────────────────────────────────────
 
-def hmetis_mcp(hg, budget, filename, nparts=30, timeout=120, **kwargs):
+def hmetis_mcp(hg, budget, filename, nparts=16, timeout=120, **kwargs):
     removed_edges    = set()
     covered_vertices = set()
     iteration        = 0
@@ -288,7 +288,7 @@ def hmetis_mcp(hg, budget, filename, nparts=30, timeout=120, **kwargs):
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
 
 
-def pure_greedy_mcp(hg, budget, filename=None, **kwargs):
+def pure_greedy_mcp_0(hg, budget, filename=None, **kwargs):
     covered_vertices = set()
     removed_edges    = set()
     start_time       = time.time()
@@ -318,6 +318,37 @@ def pure_greedy_mcp(hg, budget, filename=None, **kwargs):
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
 
+def pure_greedy_mcp(hg, budget, filename=None, **kwargs):
+    covered_vertices = set()
+    removed_edges    = set()
+    start_time       = time.time()
+    tracker          = _StageTrackerMCP(budget, start_time)
+
+    scores = _build_scores(hg, covered_vertices, removed_edges)  # build once
+
+    while len(removed_edges) < budget:
+        best_score = 0
+        best_edge  = None
+        for hedge in hg.hedges:
+            if hedge in removed_edges:
+                continue
+            if scores[hedge] > best_score:
+                best_score = scores[hedge]
+                best_edge  = hedge
+        if best_edge is None or best_score == 0:
+            break
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        covered_vertices.update(newly_covered)
+        removed_edges.add(best_edge)
+        scores[best_edge] = -1.0
+        _update_scores(hg, scores, newly_covered, removed_edges)  # incremental update
+        tracker.check(removed_edges, covered_vertices)
+
+    final_time     = round(time.time() - start_time, 4)
+    final_coverage = len(covered_vertices)
+    stages         = tracker.result(len(removed_edges), final_coverage, final_time)
+
+    return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
 
 # ─────────────────────────────────────────────
 #  Set Cover
@@ -388,28 +419,33 @@ def hmetis_set_cover(hg, filename, nparts=2, timeout=120, **kwargs):
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
 
 
+HALF_THRESHOLD = 0.50
+
+
 def pure_greedy_set_cover(hg, filename=None, **kwargs):
     covered_vertices = set()
     removed_edges    = set()
     start_time       = time.time()
     tracker          = _StageTracker(hg.nvtxs, start_time)
 
+    scores = _build_scores(hg, covered_vertices, removed_edges)  # build once
+
     while len(covered_vertices) < hg.nvtxs:
-        best_score = 0
         best_edge  = None
-        for hedge in hg.hedges:
-            if hedge in removed_edges:
+        best_score = 0.0
+        for e in hg.hedges:
+            if e in removed_edges:
                 continue
-            score = sum(hg.vtx_weights[v]
-                        for v in hg.hedges_dict[hedge] - covered_vertices)
-            if score > best_score:
-                best_score = score
-                best_edge  = hedge
-        if best_edge is None or best_score == 0:
+            if scores[e] > best_score:
+                best_score = scores[e]
+                best_edge  = e
+        if best_edge is None or best_score <= 0:
             break
         newly_covered = hg.hedges_dict[best_edge] - covered_vertices
         covered_vertices.update(newly_covered)
         removed_edges.add(best_edge)
+        scores[best_edge] = -1.0
+        _update_scores(hg, scores, newly_covered, removed_edges)  # incremental update
         tracker.check(covered_vertices, removed_edges)
 
     final_time  = round(time.time() - start_time, 4)
@@ -419,13 +455,10 @@ def pure_greedy_set_cover(hg, filename=None, **kwargs):
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
 
 
-HALF_THRESHOLD = 0.50  # switch point: 50 % of vertices covered
-
-
 def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs):
     """
-    Phase 1 — pure greedy until ≥50 % of vertices are covered.
-    Phase 2 — hMetis-guided greedy for the remaining vertices.
+    Phase 1 (0% -> 50%): incremental greedy — same logic as pure_greedy_set_cover
+    Phase 2 (50% -> 100%): hMetis-guided selection
     """
     removed_edges    = set()
     covered_vertices = set()
@@ -440,17 +473,15 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
 
     half = int(HALF_THRESHOLD * hg.nvtxs)
 
-    # ── Phase 1: pure greedy ─────────────────────────────────────────────────
-    print("[greedy_first] Phase 1: pure greedy → 50 % coverage")
+    # ── Phase 1: incremental greedy ──────────────────────────────────────────
     while len(covered_vertices) < half:
         best_edge  = None
         best_score = 0.0
         for e in hg.hedges:
             if e in removed_edges:
                 continue
-            s = scores[e]
-            if s > best_score:
-                best_score = s
+            if scores[e] > best_score:
+                best_score = scores[e]
                 best_edge  = e
         if best_edge is None or best_score <= 0:
             break
@@ -462,18 +493,13 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
             _update_scores(hg, scores, newly_covered, removed_edges)
             writer.update(best_edge, newly_covered)
         tracker.check(covered_vertices, removed_edges)
-        iteration += 1
-        if iteration % 500 == 0:
-            print(f"  [greedy] iter={iteration}, covered={len(covered_vertices)}/{hg.nvtxs}")
 
     print(f"[greedy_first] Phase 1 done — covered={len(covered_vertices)}, "
           f"edges_used={len(removed_edges)}")
 
     # ── Phase 2: hMetis-guided ───────────────────────────────────────────────
-    print("[greedy_first] Phase 2: hMetis-guided → 100 % coverage")
     while len(covered_vertices) < hg.nvtxs:
-        remaining = hg.nhedges - len(removed_edges)
-        if remaining < nparts:
+        if (hg.nhedges - len(removed_edges)) < nparts:
             _greedy_fallback(hg, covered_vertices, removed_edges, scores)
             tracker.check(covered_vertices, removed_edges)
             break
@@ -498,7 +524,6 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
             break
 
         partitions = _parse_partitions(line, e_map_inv)
-
         _select_and_update(
             hg, partitions, covered_vertices, removed_edges, scores, writer,
             stop_condition=lambda: len(covered_vertices) >= hg.nvtxs,
@@ -506,107 +531,10 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
         tracker.check(covered_vertices, removed_edges)
 
         iteration += 1
-        print(f"  [hmetis] iter={iteration}, covered={len(covered_vertices)}/{hg.nvtxs}, "
+        print(f"  [hmetis] iter={iteration}, covered={len(covered_vertices)}, "
               f"edges_used={len(removed_edges)}")
 
     final_time  = round(time.time() - start_time, 4)
     final_edges = len(removed_edges)
     stages      = tracker.result(final_edges, final_time)
-    print(f"[greedy_first] DONE — edges_used={final_edges}, time={final_time}s")
-    return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-def hmetis_set_cover_greedy_second(hg, filename, nparts=2, timeout=120, **kwargs):
-    """
-    Phase 1 — hMetis-guided greedy until ≥50 % of vertices are covered.
-    Phase 2 — pure greedy for the remaining vertices.
-    """
-    removed_edges    = set()
-    covered_vertices = set()
-    write_time       = 0.0
-    partition_time   = 0.0
-    start_time       = time.time()
-    iteration        = 0
-
-    scores  = _build_scores(hg, covered_vertices, removed_edges)
-    writer  = HgrWriter(hg)
-    tracker = _StageTracker(hg.nvtxs, start_time)
-
-    half = int(HALF_THRESHOLD * hg.nvtxs)
-
-    # ── Phase 1: hMetis-guided ───────────────────────────────────────────────
-    print("[greedy_second] Phase 1: hMetis-guided → 50 % coverage")
-    while len(covered_vertices) < half:
-        remaining = hg.nhedges - len(removed_edges)
-        if remaining < nparts:
-            break
-
-        w = time.time()
-        e_map_inv = writer.write(filename)
-        write_time += time.time() - w
-
-        p  = time.time()
-        ok = _run_hmetis(filename, nparts, timeout=timeout)
-        partition_time += time.time() - p
-
-        if not ok:
-            break
-
-        with open(f"{filename}.part.{nparts}") as f:
-            line = f.read().splitlines()
-
-        if len(line) != len(e_map_inv):
-            break
-
-        partitions = _parse_partitions(line, e_map_inv)
-
-        prev_len = len(removed_edges)
-        _select_and_update(
-            hg, partitions, covered_vertices, removed_edges, scores, writer,
-            stop_condition=lambda: len(covered_vertices) >= half,
-        )
-        tracker.check(covered_vertices, removed_edges)
-
-        if len(removed_edges) == prev_len:
-            break
-
-        iteration += 1
-        print(f"  [hmetis] iter={iteration}, covered={len(covered_vertices)}/{hg.nvtxs}, "
-              f"edges_used={len(removed_edges)}")
-
-    print(f"[greedy_second] Phase 1 done — covered={len(covered_vertices)}, "
-          f"edges_used={len(removed_edges)}")
-
-    # ── Phase 2: pure greedy ─────────────────────────────────────────────────
-    print("[greedy_second] Phase 2: pure greedy → 100 % coverage")
-    phase2_iters = 0
-    while len(covered_vertices) < hg.nvtxs:
-        best_edge  = None
-        best_score = 0.0
-        for e in hg.hedges:
-            if e in removed_edges:
-                continue
-            s = scores[e]
-            if s > best_score:
-                best_score = s
-                best_edge  = e
-        if best_edge is None or best_score <= 0:
-            break
-        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
-        if newly_covered:
-            covered_vertices.update(newly_covered)
-            removed_edges.add(best_edge)
-            scores[best_edge] = -1.0
-            _update_scores(hg, scores, newly_covered, removed_edges)
-        tracker.check(covered_vertices, removed_edges)
-        phase2_iters += 1
-        if phase2_iters % 500 == 0:
-            print(f"  [greedy] iter={phase2_iters}, covered={len(covered_vertices)}/{hg.nvtxs}")
-
-    final_time  = round(time.time() - start_time, 4)
-    final_edges = len(removed_edges)
-    stages      = tracker.result(final_edges, final_time)
-    print(f"[greedy_second] DONE — edges_used={final_edges}, time={final_time}s")
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
