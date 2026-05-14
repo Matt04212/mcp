@@ -3,11 +3,6 @@ import numpy as np
 from greedy import greedy
 from subgraph2 import HgrWriter, write_hgr
 
-
-# ─────────────────────────────────────────────
-#  Shared helpers
-# ─────────────────────────────────────────────
-
 def _build_scores(hg, covered_vertices, removed_edges):
     scores = np.zeros(hg.nhedges + 1, dtype=np.float64)
     for e in hg.hedges:
@@ -52,7 +47,7 @@ def _parse_partitions(line, e_map_inv):
 
 def _greedy_fallback(hg, covered_vertices, removed_edges, scores):
     """
-    Proper greedy fallback — picks globally best edge each step.
+    Proper greedy fallback ??picks globally best edge each step.
     Used when hMETIS fails or times out mid-run.
     """
     while len(covered_vertices) < hg.nvtxs:
@@ -94,7 +89,7 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     # check if hMETIS actually wrote the file
     if not os.path.exists(part_file):
-        print(f"  [warn] hMETIS did not produce partition file — likely crashed")
+        print(f"  [warn] hMETIS did not produce partition file ??likely crashed")
         return False
 
     return True
@@ -119,12 +114,6 @@ def _select_and_update(hg, partitions, covered_vertices, removed_edges,
                 _update_scores(hg, scores, newly_covered, removed_edges)
                 writer.update(best_edge, newly_covered)
 
-
-# ─────────────────────────────────────────────
-#  Stage checkpointing for MCP
-#  Milestones: budget/3 and 2*budget/3 edges selected.
-#  Tracks coverage gained in each third of the budget.
-# ─────────────────────────────────────────────
 
 class _StageTrackerMCP:
     """
@@ -167,11 +156,6 @@ class _StageTrackerMCP:
         }
 
 
-# ─────────────────────────────────────────────
-#  Stage checkpointing for Set Cover
-#  Milestones: 33% and 66% of vertices covered.
-#  Tracks edges used in each coverage third.
-# ─────────────────────────────────────────────
 
 class _StageTracker:
     """
@@ -224,16 +208,12 @@ class _StageTracker:
         }
 
 
-# ─────────────────────────────────────────────
-#  MCP
-# ─────────────────────────────────────────────
-
 def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
                nparts_mid=None, nparts_late=None, **kwargs):
     """
-    nparts       — partitions for early stage  (0        -> budget/3)
-    nparts_mid   — partitions for mid stage    (budget/3 -> 2*budget/3), defaults to nparts
-    nparts_late  — partitions for late stage   (2*budget/3 -> budget),   defaults to nparts
+    nparts       ??partitions for early stage  (0        -> budget/3)
+    nparts_mid   ??partitions for mid stage    (budget/3 -> 2*budget/3), defaults to nparts
+    nparts_late  ??partitions for late stage   (2*budget/3 -> budget),   defaults to nparts
     """
     nparts_mid  = nparts_mid  if nparts_mid  is not None else nparts
     nparts_late = nparts_late if nparts_late is not None else nparts
@@ -329,7 +309,6 @@ def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
 
     two_third = 2 * budget // 3
 
-    # ── Phase 1: hMetis ──────────────────────────────────────────────────────
     while len(removed_edges) < two_third:
         if (hg.nhedges - len(removed_edges)) < nparts:
             break
@@ -372,10 +351,10 @@ def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
               f"removed={len(removed_edges)}, parse={parse_time:.4f}s, "
               f"select={select_time:.4f}s")
 
-    print(f"[hmetis_mcp_early] Phase 1 done — removed={len(removed_edges)}, "
+    print(f"[hmetis_mcp_early] Phase 1 done ??removed={len(removed_edges)}, "
           f"covered={len(covered_vertices)}")
 
-    # ── Phase 2: greedy ──────────────────────────────────────────────────────
+    # Phase 2: greedy
     while len(removed_edges) < budget:
         best_edge  = None
         best_score = 0.0
@@ -463,9 +442,9 @@ def pure_greedy_mcp(hg, budget, filename=None, **kwargs):
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
 
-# ─────────────────────────────────────────────
+
 #  Set Cover
-# ─────────────────────────────────────────────
+
 
 def hmetis_set_cover(hg, filename, nparts=2, timeout=120, **kwargs):
     removed_edges    = set()
@@ -570,7 +549,7 @@ def pure_greedy_set_cover(hg, filename=None, **kwargs):
 
 def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs):
     """
-    Phase 1 (0% -> 50%): incremental greedy — same logic as pure_greedy_set_cover
+    Phase 1 (0% -> 50%): incremental greedy ??same logic as pure_greedy_set_cover
     Phase 2 (50% -> 100%): hMetis-guided selection
     """
     removed_edges    = set()
@@ -586,7 +565,7 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
 
     half = int(HALF_THRESHOLD * hg.nvtxs)
 
-    # ── Phase 1: incremental greedy ──────────────────────────────────────────
+    #  Phase 1: incremental greedy
     while len(covered_vertices) < half:
         best_edge  = None
         best_score = 0.0
@@ -607,10 +586,10 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
             writer.update(best_edge, newly_covered)
         tracker.check(covered_vertices, removed_edges)
 
-    print(f"[greedy_first] Phase 1 done — covered={len(covered_vertices)}, "
+    print(f"[greedy_first] Phase 1 done ??covered={len(covered_vertices)}, "
           f"edges_used={len(removed_edges)}")
 
-    # ── Phase 2: hMetis-guided ───────────────────────────────────────────────
+    #  Phase 2: hMetis-guided
     while len(covered_vertices) < hg.nvtxs:
         if (hg.nhedges - len(removed_edges)) < nparts:
             _greedy_fallback(hg, covered_vertices, removed_edges, scores)
@@ -651,15 +630,3 @@ def hmetis_set_cover_greedy_first(hg, filename, nparts=2, timeout=120, **kwargs)
     final_edges = len(removed_edges)
     stages      = tracker.result(final_edges, final_time)
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
-
-def _compute_coverage(hg, removed_edges):
-    covered_vertices = set()
-    for e in removed_edges:
-        covered_vertices.update(hg.hedges_dict[e])
-    return covered_vertices
-
-
-def _coverage_weight(hg, removed_edges):
-    covered = _compute_coverage(hg, removed_edges)
-    return sum(hg.vtx_weights[v] for v in covered)
-
