@@ -1,6 +1,7 @@
 import time
 import numpy as np
 from hypergraph import Hypergraph
+from optimal import optimal_solu
 
 
 # ─────────────────────────────────────────────
@@ -142,6 +143,8 @@ def evaluate_mcp(algos, filename, size, distributions, n_runs, budget_ratio, **k
                 hg = Hypergraph(nhedges, nvtxs)
                 hg.generate(distribution=dist)
                 hg.output('original.hgr')
+
+                o = optimal_solu(hg, budget=budget)
 
                 for algo_name, algo_func in algos.items():
                     metrics = run_single(hg, algo_func, filename, budget=budget, **kwargs)

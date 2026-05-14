@@ -85,7 +85,7 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         subprocess.run(
-            f"./hmetis {filename} {nparts} 5 1 5 1 0 0 0",
+            f"./hmetis {filename} {nparts} 5 1 5 2 3 0 0",
             shell=True, timeout=timeout, capture_output=True
         )
     except subprocess.TimeoutExpired:
@@ -228,7 +228,19 @@ class _StageTracker:
 #  MCP
 # ─────────────────────────────────────────────
 
-def hmetis_mcp(hg, budget, filename, nparts=16, timeout=120, **kwargs):
+def hmetis_mcp(hg, budget, filename, nparts=64, timeout=120,
+               nparts_mid=32, nparts_late=16, **kwargs):
+    """
+    nparts       — partitions for early stage  (0        -> budget/3)
+    nparts_mid   — partitions for mid stage    (budget/3 -> 2*budget/3), defaults to nparts
+    nparts_late  — partitions for late stage   (2*budget/3 -> budget),   defaults to nparts
+    """
+    nparts_mid  = nparts_mid  if nparts_mid  is not None else nparts
+    nparts_late = nparts_late if nparts_late is not None else nparts
+
+    stage_thresholds = [budget // 3, 2 * (budget // 3)]
+    nparts_schedule  = [nparts, nparts_mid, nparts_late]
+
     removed_edges    = set()
     covered_vertices = set()
     iteration        = 0
@@ -240,7 +252,85 @@ def hmetis_mcp(hg, budget, filename, nparts=16, timeout=120, **kwargs):
     writer  = HgrWriter(hg)
     tracker = _StageTrackerMCP(budget, start_time)
 
+    def _current_nparts():
+        n = len(removed_edges)
+        if n < stage_thresholds[0]:
+            return nparts_schedule[0]
+        elif n < stage_thresholds[1]:
+            return nparts_schedule[1]
+        else:
+            return nparts_schedule[2]
+
     while len(removed_edges) < budget:
+        cur_nparts = _current_nparts()
+
+        if (hg.nhedges - len(removed_edges)) < cur_nparts:
+            break
+
+        w = time.time()
+        e_map_inv = writer.write(filename)
+        write_time += time.time() - w
+
+        p  = time.time()
+        ok = _run_hmetis(filename, cur_nparts, timeout=timeout)
+        partition_time += time.time() - p
+        if not ok:
+            break
+
+        with open(f"{filename}.part.{cur_nparts}") as f:
+            line = f.read().splitlines()
+        if len(line) != len(e_map_inv):
+            break
+
+        p2 = time.time()
+        partitions = _parse_partitions(line, e_map_inv)
+        parse_time = time.time() - p2
+
+        prev_len = len(removed_edges)
+
+        s = time.time()
+        _select_and_update(
+            hg, partitions, covered_vertices, removed_edges, scores, writer,
+            stop_condition=lambda: len(removed_edges) >= budget
+        )
+        select_time = time.time() - s
+
+        tracker.check(removed_edges, covered_vertices)
+
+        if len(removed_edges) == prev_len:
+            break
+
+        iteration += 1
+        print(f"iter={iteration}, nparts={cur_nparts}, covered={len(covered_vertices)}, "
+              f"removed={len(removed_edges)}, parse={parse_time:.4f}s, "
+              f"select={select_time:.4f}s")
+
+    final_time     = round(time.time() - start_time, 4)
+    final_coverage = len(covered_vertices)
+    stages         = tracker.result(len(removed_edges), final_coverage, final_time)
+
+    return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
+
+def hmetis_mcp_early(hg, budget, filename, nparts=64, timeout=120, **kwargs):
+    """
+    Phase 1 (0 -> budget/3)        : hMetis-guided selection
+    Phase 2 (budget/3 -> budget)   : pure greedy fallback
+    """
+    removed_edges    = set()
+    covered_vertices = set()
+    iteration        = 0
+    write_time       = 0
+    partition_time   = 0
+    start_time       = time.time()
+
+    scores  = _build_scores(hg, covered_vertices, removed_edges)
+    writer  = HgrWriter(hg)
+    tracker = _StageTrackerMCP(budget, start_time)
+
+    first_third = budget // 3
+
+    # ── Phase 1: hMetis ──────────────────────────────────────────────────────
+    while len(removed_edges) < first_third:
         if (hg.nhedges - len(removed_edges)) < nparts:
             break
 
@@ -278,8 +368,31 @@ def hmetis_mcp(hg, budget, filename, nparts=16, timeout=120, **kwargs):
             break
 
         iteration += 1
-        print(f"iter={iteration}, covered={len(covered_vertices)}, removed={len(removed_edges)}, "
-              f"parse={parse_time:.4f}s, select={select_time:.4f}s")
+        print(f"[hmetis] iter={iteration}, covered={len(covered_vertices)}, "
+              f"removed={len(removed_edges)}, parse={parse_time:.4f}s, "
+              f"select={select_time:.4f}s")
+
+    print(f"[hmetis_mcp_early] Phase 1 done — removed={len(removed_edges)}, "
+          f"covered={len(covered_vertices)}")
+
+    # ── Phase 2: greedy ──────────────────────────────────────────────────────
+    while len(removed_edges) < budget:
+        best_edge  = None
+        best_score = 0.0
+        for e in hg.hedges:
+            if e in removed_edges:
+                continue
+            if scores[e] > best_score:
+                best_score = scores[e]
+                best_edge  = e
+        if best_edge is None or best_score <= 0:
+            break
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        covered_vertices.update(newly_covered)
+        removed_edges.add(best_edge)
+        scores[best_edge] = -1.0
+        _update_scores(hg, scores, newly_covered, removed_edges)
+        tracker.check(removed_edges, covered_vertices)
 
     final_time     = round(time.time() - start_time, 4)
     final_coverage = len(covered_vertices)
