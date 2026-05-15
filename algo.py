@@ -1,6 +1,7 @@
+
+
 import subprocess, time
 import numpy as np
-from greedy import greedy
 from subgraph2 import HgrWriter, write_hgr
 
 def _build_scores(hg, covered_vertices, removed_edges):
@@ -27,13 +28,29 @@ def _update_scores(hg, scores, newly_covered, removed_edges):
             )
 
 
-def _best_in_partition(part_edges, removed_edges, scores):
+def _selection_value(hg, edge, covered_vertices, scores, overlap_penalty):
+    return scores[edge] - overlap_penalty * len(hg.hedges_dict[edge] & covered_vertices)
+
+
+def _best_in_partition(part_edges, removed_edges, scores, hg=None,
+                       covered_vertices=None, overlap_penalty=0.0):
     candidates = np.array([e for e in part_edges if e not in removed_edges],
                           dtype=np.int32)
     if len(candidates) == 0:
         return None
-    best_idx  = np.argmax(scores[candidates])
-    best_edge = candidates[best_idx]
+
+    if overlap_penalty:
+        best_edge = max(
+            candidates,
+            key=lambda e: (
+                _selection_value(hg, int(e), covered_vertices, scores, overlap_penalty),
+                scores[int(e)],
+            ),
+        )
+    else:
+        best_idx  = np.argmax(scores[candidates])
+        best_edge = candidates[best_idx]
+
     return int(best_edge) if scores[best_edge] > 0 else None
 
 
@@ -45,14 +62,16 @@ def _parse_partitions(line, e_map_inv):
     return partitions
 
 
-def _greedy_fallback(hg, covered_vertices, removed_edges, scores):
+def _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget=None):
     """
     Proper greedy fallback ??picks globally best edge each step.
     Used when hMETIS fails or times out mid-run.
     """
     while len(covered_vertices) < hg.nvtxs:
+        if budget is not None and len(removed_edges) >= budget:
+            break
         best_edge  = None
-        best_score = 0.0
+        best_score = -np.inf
         for e in hg.hedges:
             if e in removed_edges:
                 continue
@@ -79,9 +98,9 @@ def _run_hmetis(filename, nparts, timeout=120):
         os.remove(part_file)
 
     try:
-        subprocess.run(
-            f"./hmetis {filename} {nparts} 5 2 5 2 3 0 0",
-            shell=True, timeout=timeout, capture_output=True
+        result = subprocess.run(
+            ["./hmetis", filename, str(nparts), "3", "5", "5", "2", "3", "0", "0"],
+            timeout=timeout, capture_output=True, text=True
         )
     except subprocess.TimeoutExpired:
         print(f"  [warn] hMETIS timed out after {timeout}s")
@@ -89,6 +108,10 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     # check if hMETIS actually wrote the file
     if not os.path.exists(part_file):
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            detail = f": {stderr}" if stderr else ""
+            print(f"  [warn] hMETIS exited with code {result.returncode}{detail}")
         print(f"  [warn] hMETIS did not produce partition file ??likely crashed")
         return False
 
@@ -96,34 +119,70 @@ def _run_hmetis(filename, nparts, timeout=120):
 
 
 def _select_and_update(hg, partitions, covered_vertices, removed_edges,
-                       scores, writer, stop_condition):
+                       scores, writer, stop_condition, overlap_penalty=0.0):
     """
-    Pick best edge per partition, update all state.
+    Pick at most one edge per partition, updating all state after each pick.
+
+    The partition file order is not meaningful. Because each chosen edge changes
+    every remaining edge's marginal gain, selecting partitions in file order can
+    choose a weak, high-overlap edge before a strong candidate. Recomputing each
+    partition's representative and taking the best representative globally keeps
+    the hMETIS diversity constraint without letting arbitrary partition order
+    decide the solution.
+
     stop_condition: a callable() -> bool that signals early exit.
     """
-    for part_edges in partitions.values():
+    remaining_parts = dict(partitions)
+
+    while remaining_parts and not stop_condition():
+        best_part = None
+        best_edge = None
+        best_score = -np.inf
+
+        for part, part_edges in remaining_parts.items():
+            edge = _best_in_partition(
+                part_edges, removed_edges, scores, hg, covered_vertices, overlap_penalty
+            )
+            if edge is None:
+                continue
+
+            selection_score = _selection_value(
+                hg, edge, covered_vertices, scores, overlap_penalty
+            )
+            if selection_score > best_score:
+                best_part = part
+                best_edge = edge
+                best_score = selection_score
+
+        if best_edge is None:
+            break
+
+        remaining_parts.pop(best_part)
         if stop_condition():
             break
-        best_edge = _best_in_partition(part_edges, removed_edges, scores)
-        if best_edge is not None:
-            newly_covered = hg.hedges_dict[best_edge] - covered_vertices
-            if newly_covered:
-                covered_vertices.update(newly_covered)
-                removed_edges.add(best_edge)
-                scores[best_edge] = -1.0
-                _update_scores(hg, scores, newly_covered, removed_edges)
-                writer.update(best_edge, newly_covered)
+
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        if newly_covered:
+            covered_vertices.update(newly_covered)
+            removed_edges.add(best_edge)
+            scores[best_edge] = -1.0
+            _update_scores(hg, scores, newly_covered, removed_edges)
+            writer.update(best_edge, newly_covered)
 
 
 class _StageTrackerMCP:
     """
     Records coverage and elapsed time at budget/3 and 2*budget/3 milestones.
-    Stages (by edges selected):
-      early : 0          -> budget/3
-      mid   : budget/3   -> 2*budget/3
-      late  : 2*budget/3 -> budget   (derived from final - mid snapshot)
-    Call .check() after every edge selection.
+
+    FIX: also records edges_used at each snapshot so comparisons across
+    algorithms are honest — hMetis selects nparts edges per call and can
+    overshoot the threshold by up to nparts-1 edges, while greedy hits it
+    exactly. Reporting edges_used alongside coverage makes this visible.
+
+    result() now includes edges_used at each stage boundary so the caller
+    can normalise coverage-per-edge when comparing algorithms.
     """
+
     def __init__(self, budget, start_time):
         self.start_time = start_time
         self.thirds     = [budget // 3, 2 * (budget // 3)]
@@ -136,7 +195,9 @@ class _StageTrackerMCP:
             if not self._hit[i] and n >= threshold:
                 self._hit[i] = True
                 self.snapshots[i] = {
-                    'edges_used':   n,
+                    'edges_used':   n,                   # actual count (may exceed threshold)
+                    'threshold':    threshold,            # what we were aiming for
+                    'overshoot':    n - threshold,        # how far past threshold we are
                     'coverage':     len(covered_vertices),
                     'time_elapsed': round(time.time() - self.start_time, 4),
                 }
@@ -146,15 +207,23 @@ class _StageTrackerMCP:
         s66 = self.snapshots[1]
 
         return {
-            # coverage gained in each stage (absolute vertices newly covered)
-            'early_coverage':  s33['coverage']                              if s33 else None,
-            'early_time':      s33['time_elapsed']                          if s33 else None,
-            'mid_coverage':    (s66['coverage'] - s33['coverage'])          if (s33 and s66) else None,
-            'mid_time':        (s66['time_elapsed'] - s33['time_elapsed'])  if (s33 and s66) else None,
-            'late_coverage':   (final_coverage - s66['coverage'])           if s66 else None,
-            'late_time':       (final_time - s66['time_elapsed'])           if s66 else None,
-        }
+            # ── early stage ──────────────────────────────────────────────────
+            'early_coverage':   s33['coverage']                             if s33 else None,
+            'early_edges_used': s33['edges_used']                           if s33 else None,
+            'early_overshoot':  s33['overshoot']                            if s33 else None,
+            'early_time':       s33['time_elapsed']                         if s33 else None,
 
+            # ── mid stage ────────────────────────────────────────────────────
+            'mid_coverage':     (s66['coverage']     - s33['coverage'])     if (s33 and s66) else None,
+            'mid_edges_used':   (s66['edges_used']   - s33['edges_used'])   if (s33 and s66) else None,
+            'mid_overshoot':    s66['overshoot']                            if s66 else None,
+            'mid_time':         (s66['time_elapsed'] - s33['time_elapsed']) if (s33 and s66) else None,
+
+            # ── late stage ───────────────────────────────────────────────────
+            'late_coverage':    (final_coverage - s66['coverage'])          if s66 else None,
+            'late_edges_used':  (final_edges    - s66['edges_used'])        if s66 else None,
+            'late_time':        (final_time     - s66['time_elapsed'])      if s66 else None,
+        }
 
 
 class _StageTracker:
@@ -208,8 +277,8 @@ class _StageTracker:
         }
 
 
-def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
-               nparts_mid=None, nparts_late=None, **kwargs):
+def hmetis_mcp(hg, budget, filename, nparts=4, timeout=120,
+               nparts_mid=None, nparts_late=None, overlap_penalty=0.0, **kwargs):
     """
     nparts       ??partitions for early stage  (0        -> budget/3)
     nparts_mid   ??partitions for mid stage    (budget/3 -> 2*budget/3), defaults to nparts
@@ -245,6 +314,7 @@ def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
         cur_nparts = _current_nparts()
 
         if (hg.nhedges - len(removed_edges)) < cur_nparts:
+            _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget)
             break
 
         w = time.time()
@@ -255,11 +325,13 @@ def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
         ok = _run_hmetis(filename, cur_nparts, timeout=timeout)
         partition_time += time.time() - p
         if not ok:
+            _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget)
             break
 
         with open(f"{filename}.part.{cur_nparts}") as f:
             line = f.read().splitlines()
         if len(line) != len(e_map_inv):
+            _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget)
             break
 
         p2 = time.time()
@@ -271,13 +343,15 @@ def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
         s = time.time()
         _select_and_update(
             hg, partitions, covered_vertices, removed_edges, scores, writer,
-            stop_condition=lambda: len(removed_edges) >= budget
+            stop_condition=lambda: len(removed_edges) >= budget,
+            overlap_penalty=overlap_penalty,
         )
         select_time = time.time() - s
 
         tracker.check(removed_edges, covered_vertices)
 
         if len(removed_edges) == prev_len:
+            _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget)
             break
 
         iteration += 1
@@ -291,7 +365,8 @@ def hmetis_mcp(hg, budget, filename, nparts=8, timeout=120,
 
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
 
-def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
+def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120,
+                     overlap_penalty=0.0, **kwargs):
     """
     Phase 1 (0 -> budget/3)        : hMetis-guided selection
     Phase 2 (budget/3 -> budget)   : pure greedy fallback
@@ -307,9 +382,9 @@ def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
     writer  = HgrWriter(hg)
     tracker = _StageTrackerMCP(budget, start_time)
 
-    two_third = 2 * budget // 3
+    one_third = budget // 3
 
-    while len(removed_edges) < two_third:
+    while len(removed_edges) < one_third:
         if (hg.nhedges - len(removed_edges)) < nparts:
             break
 
@@ -337,7 +412,8 @@ def hmetis_mcp_early(hg, budget, filename, nparts=8, timeout=120, **kwargs):
         s = time.time()
         _select_and_update(
             hg, partitions, covered_vertices, removed_edges, scores, writer,
-            stop_condition=lambda: len(removed_edges) >= budget
+            stop_condition=lambda: len(removed_edges) >= budget,
+            overlap_penalty=overlap_penalty,
         )
         select_time = time.time() - s
 

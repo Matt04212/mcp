@@ -1,14 +1,11 @@
 from hypergraph import Hypergraph
-from analysis import plot_graph, analyze_graph
-from algo import hmetis_set_cover
+from analysis import analyze_graph, plot_graph
 
-distributions = ['dis2']
+dist = 'uniform'
 
+hg = Hypergraph(10000, 20000)
+hg.generate(distribution=dist)
 
-for dist in distributions:
-    hg = Hypergraph(60000, 120000)
-    hg.generate(distribution=dist)
-    stats, _, _ = analyze_graph(hg, dist)
-    print(stats)
-    #plot_graph(hg, dist)
-
+a, _, _ = analyze_graph(hg, dist)
+print(a)
+#plot_graph(hg, dist)

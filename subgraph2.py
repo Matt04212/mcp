@@ -57,7 +57,7 @@ class HgrWriter:
             inc = self._incident[vtx]
             if inc is None:          # covered
                 continue
-            mapped = [e_map[e] for e in inc]   # translate to hMETIS IDs
+            mapped = sorted(e_map[e] for e in inc)   # translate to hMETIS IDs
             if mapped:               # skip isolated vertices
                 rows.append(" ".join(map(str, mapped)) + "\n")
 
@@ -84,7 +84,7 @@ def write_hgr(hg, covered_vertices, removed_edges, filename):
     for vtx in hg.vtxs:
         if vtx in covered_vertices:
             continue
-        incident = [e_map[e] for e in hg.vtxs_dict[vtx] if e not in removed_edges]
+        incident = sorted(e_map[e] for e in hg.vtxs_dict[vtx] if e not in removed_edges)
         if incident:
             rows.append(" ".join(map(str, incident)) + "\n")
 

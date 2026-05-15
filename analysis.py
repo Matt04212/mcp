@@ -40,3 +40,4 @@ def plot_graph(hg, dist):
     plt.show()
 
     return stats
+

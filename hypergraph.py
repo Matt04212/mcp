@@ -36,13 +36,13 @@ class Hypergraph:
 
         elif distribution == 'uniform':
             low = kwargs.get('low', 1)
-            high = kwargs.get('high', 500)
+            high = kwargs.get('high', 100)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'dis':
-            rmax_small = kwargs.get('rmax_small', 0.05)
-            rmax_medium = kwargs.get('rmax_medium', 0.1)
-            rmax_large = kwargs.get('rmax_large', 0.2)
+            rmax_small = kwargs.get('rmax_small', 0.03)
+            rmax_medium = kwargs.get('rmax_medium', 0.05)
+            rmax_large = kwargs.get('rmax_large', 0.08)
 
             # proportion of each size - many small, some medium, few large
             prop_small = kwargs.get('prop_small', 0.60)
