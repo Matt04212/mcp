@@ -1,7 +1,12 @@
 import pulp
 from hypergraph import Hypergraph
 
-def optimal_solu(hg, budget):
+def optimal_solu(hg, budget, time_limit=None, msg=False):
+    result = optimal_solu_detail(hg, budget, time_limit=time_limit, msg=msg)
+    return result["objective"]
+
+
+def optimal_solu_detail(hg, budget, time_limit=None, msg=False):
     prob = pulp.LpProblem('MCP', pulp.LpMaximize)
 
     # variables
@@ -18,7 +23,13 @@ def optimal_solu(hg, budget):
     for v in hg.vtxs:
         prob += y[v] <= pulp.lpSum(x[h] for h in hg.vtxs_dict[v])
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    solver = pulp.PULP_CBC_CMD(msg=msg, timeLimit=time_limit)
+    status_code = prob.solve(solver)
 
-    optimal_coverage = round(pulp.value(prob.objective), 6)
-    return optimal_coverage
+    objective = pulp.value(prob.objective)
+    objective = round(objective, 6) if objective is not None else None
+
+    return {
+        "objective": objective,
+        "status": pulp.LpStatus.get(status_code, str(status_code)),
+    }
