@@ -111,8 +111,8 @@ def build_natural_hierarchy_graph(
     seed,
     n_communities=None,
     subcommunities_per_community=None,
-    max_edge_ratio=0.0,
-    max_edge_cap=14,
+    max_edge_ratio=0.022,
+    max_edge_cap=90,
 ):
     """
     Stochastic hierarchical community graph.
@@ -148,10 +148,7 @@ def build_natural_hierarchy_graph(
     # Keep hierarchy edges useful but avoid saturating the whole universe when
     # F=0.8|U|. The cap scales with |U|, but the lower bound stays modest so
     # small/medium instances do not become automatically full-covered.
-    scaled_edge_cap = max(7, int(0.12 * np.sqrt(nvtxs)))
-    if max_edge_ratio > 0:
-        scaled_edge_cap = min(scaled_edge_cap, int(max_edge_ratio * nvtxs))
-    max_edge_size = min(max_edge_cap, scaled_edge_cap)
+    max_edge_size = max(20, min(max_edge_cap, int(max_edge_ratio * nvtxs)))
     n_global = int(0.14 * nhedges)
     n_community = int(0.28 * nhedges)
     n_local = int(0.44 * nhedges)
