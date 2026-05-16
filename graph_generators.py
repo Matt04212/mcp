@@ -28,6 +28,13 @@ def _set_vertex_weights(hg, seed, weight_mode):
         raise ValueError(f"unknown weight_mode: {weight_mode}")
 
 
+def _auto_dis2_rmax(nvtxs):
+    # Target edge size grows sublinearly with |U| so larger spatial instances
+    # are not just dense versions of smaller ones.
+    target_edge_size = min(70, max(12, int(0.50 * np.sqrt(nvtxs))))
+    return float(np.sqrt(target_edge_size / (np.pi * nvtxs)))
+
+
 def build_dis2_graph(nhedges, nvtxs, seed, rmax=0.035, weight_mode="uniform"):
     """
     Geometric random graph matching Hypergraph.generate(distribution='dis2').
@@ -38,6 +45,8 @@ def build_dis2_graph(nhedges, nvtxs, seed, rmax=0.035, weight_mode="uniform"):
     """
     random.seed(seed)
     np.random.seed(seed)
+    if rmax == "auto":
+        rmax = _auto_dis2_rmax(nvtxs)
     hg = Hypergraph(nhedges, nvtxs)
     hg.generate(distribution="dis2", rmax=rmax)
     _set_vertex_weights(hg, seed + 17, weight_mode)

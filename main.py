@@ -46,7 +46,7 @@ Change the CONFIG below to run larger/smaller experiments.
 CONFIG = {
     # dis2_uniform is unweighted. dis2_weighted uses vertex weights 1..10,
     # matching the weighted option from the paper.
-    "graph_types": ["dis2_weighted"],
+    "graph_types": ["dis2_unweighted", "natural_hierarchy"],
     "results_file": "mcp_two_graph_compare_results.csv",
     "summary_file": "mcp_two_graph_compare_summary.csv",
     "hmetis_file": "mcp_two_graph_compare.hgr",
@@ -61,39 +61,23 @@ CONFIG = {
 
 
 SCENARIOS = [
-    # Paper-style small cases. LP is feasible here.
-    #{"name": "paper_tiny_F0.5_B0.1", "nvtxs": 100, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
-    #{"name": "paper_tiny_F0.8_B0.1", "nvtxs": 100, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 4},
-    #{"name": "paper_small_F0.5_B0.1", "nvtxs": 150, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
-    #{"name": "paper_small_F0.8_B0.1", "nvtxs": 150, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
-    #{"name": "paper_small_F0.5_B0.1", "nvtxs": 200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
-    #{"name": "paper_small_F0.8_B0.1", "nvtxs": 200, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
-
-    # Medium cases. LP is usually too slow; use quality/runtime comparison.
-    {"name": "medium_F0.5_B0.1", "nvtxs": 1200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    #{"name": "medium_F0.8_B0.1", "nvtxs": 1200, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
-    {"name": "large_F0.5_B0.1", "nvtxs": 2400, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    #{"name": "large_F0.8_B0.1", "nvtxs": 2400, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
-    {"name": "large_F0.5_B0.1", "nvtxs": 4800, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    #{"name": "large_F0.8_B0.1", "nvtxs": 4800, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
-
-
-    # Keep these disabled unless you really want to test paper's larger budget.
-    # On natural_hierarchy they often cover all vertices, making algorithms tie.
-    # {"name": "paper_small_F0.5_B0.2", "nvtxs": 500, "f_ratio": 0.5, "budget_ratio": 0.2, "runs": 3, "solve_lp": True, "nparts": 8},
-    # {"name": "medium_F0.8_B0.2", "nvtxs": 1200, "f_ratio": 0.8, "budget_ratio": 0.2, "runs": 3, "solve_lp": False, "nparts": 16},
+    {"name": "scale_500_F0.5_B0.1", "nvtxs": 500, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
+    {"name": "scale_1000_F0.5_B0.1", "nvtxs": 1000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
+    {"name": "scale_2000_F0.5_B0.1", "nvtxs": 2000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
+    {"name": "scale_5000_F0.5_B0.1", "nvtxs": 5000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
+    {"name": "scale_10000_F0.5_B0.1", "nvtxs": 10000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16, "skip_algorithms": ["pure_tabu"]},
+    {"name": "scale_15000_F0.5_B0.1", "nvtxs": 15000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16, "skip_algorithms": ["pure_tabu"]},
 ]
 
 
 GRAPH_BUILDERS = {
     "dis2_uniform": {
         "fn": build_dis2_graph,
-        # rmax controls spatial edge size. 0.035 was used in earlier tests.
-        "kwargs": {"rmax": 0.035, "weight_mode": "uniform"},
+        "kwargs": {"rmax": "auto", "weight_mode": "uniform"},
     },
     "dis2_unweighted": {
         "fn": build_dis2_graph,
-        "kwargs": {"rmax": 0.035, "weight_mode": "uniform"},
+        "kwargs": {"rmax": "auto", "weight_mode": "uniform"},
     },
     "dis2_weighted": {
         "fn": build_dis2_graph,
@@ -115,17 +99,18 @@ ALGORITHMS = {
     "hmetis_refine": {
         "kind": "refine",
         "nparts": "scenario",
-        "top_per_partition": 4,
-       "min_gain_ratio": 0.70,
-        "refine_top_per_partition": 10,
+        "top_per_partition": 5,
+        "min_gain_ratio": 0.55,
+        "refine_top_per_partition": 14,
         "refine_rounds": 5,
+        "max_swaps_per_round": 10,
     },
     "pure_oblswap": {
         "kind": "oblswap",
         "max_iter": 200,
-        # Set to None for exact full 1-swap search. Use a number like 200 if
-        # full search becomes too slow on larger instances.
-        "candidate_pool_size": None,
+        # Full OblSwap becomes very expensive for the 10k/15k cases. This keeps
+        # the comparison practical while preserving the one-swap logic.
+        "candidate_pool_size": 400,
     },
     "pure_tabu": {
         "kind": "tabu",
@@ -263,6 +248,7 @@ def iter_scenarios():
                     "run": run,
                     "seed": seed,
                     "solve_lp": size_cfg.get("solve_lp", False),
+                    "skip_algorithms": size_cfg.get("skip_algorithms", []),
                 }
                 scenario["nparts"] = scenario_nparts({**scenario, **size_cfg})
                 yield scenario
@@ -310,6 +296,14 @@ def main():
 
         run_metrics = {}
         for algo_name, algo_config in ALGORITHMS.items():
+            if algo_name in scenario.get("skip_algorithms", []):
+                print(
+                    f"[skip] graph={scenario['graph_type']} "
+                    f"scenario={scenario['scenario_name']} "
+                    f"run={scenario['run']} {algo_name}",
+                    flush=True,
+                )
+                continue
             resolved_config = resolved_algo_config(algo_config, scenario)
             metrics = run_algo(
                 hg=hg,
