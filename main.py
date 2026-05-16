@@ -1,84 +1,422 @@
-from algo import (hmetis_set_cover, pure_greedy_set_cover, hmetis_mcp, pure_greedy_mcp, pure_greedy_mcp_0,
-hmetis_set_cover_greedy_first, hmetis_mcp_early)
-from evaluation import evaluate_mcp, evaluate_optimal
+import contextlib
+import io
+import random
+import time
+
+import numpy as np
 import pandas as pd
 
-
-distributions1 = [
-    #'dis',
-    'dis2',
-    #'beta_right',
-    #'beta_bell',
-    #'beta_left',
-    #'uniform'
-]
-
-size1 = [
-    (100, 200),
-    #(30000, 60000),
-    #(35000, 70000),
-    #(40000, 80000),
-    #(45000, 90000),
-    #(50000, 100000),
-    #(55000, 110000),
-    #(60000, 120000)
-]
-
-all_results = []
-all_stats = []
+from algo import hmetis_mcp, hmetis_mcp_refine, pure_greedy_mcp, pure_tabu_mcp
+from evaluation import _compute_overlap
+from graph_generators import build_dis2_graph, build_natural_hierarchy_graph
+from optimal import optimal_solu_detail
 
 
-algos1 = {
-    'hmetis': hmetis_mcp,
-    #'hmetis_first': hmetis_mcp_early,
-    #'pure_greedy_0' : pure_greedy_mcp_0,
-    'pure_greedy': pure_greedy_mcp
-
-}
-results1 = evaluate_mcp(
-    algos=algos1,
-    filename="data1.hgr",
-    size=size1,
-    distributions=distributions1,
-    n_runs=1,
-    budget_ratio = 0.1
-)
-
-df1 = pd.DataFrame(results1)
-print(df1.to_string(index=False))
-
-
-"""distributions2 = [
-    #'beta_right',
-    #'beta_bell',
-    #'beta_left'
-    #'uniform',
-    #'dis',
-    'dis2'
-]
-
-size2 = [
-    (160, 200)
-]
-
-
-algos2 = {
-    #'hmetis': hmetis_mcp,
-    'hmetis_swap': hmetis_mcp_swap,
-    #'hmetis_first': hmetis_mcp_early,
-    'pure_tabu': pure_tabu_mcp,
-    'pure_greedy': pure_greedy_mcp
-}
-
-results2 = evaluate_optimal(
-    algos=algos2,
-    filename="data2.hgr",
-    size=size2,
-    distributions=distributions2,
-    n_runs=10,
-    budget_ratio = 0.1
-)
-
-df2 = pd.DataFrame(results2)
-print(df2.to_string(index=False))
 """
+Clean MCP experiment runner.
+
+Paper-style sizing:
+    F = number of hedges/sets/facilities
+    |U| = number of vertices/elements/users/locations
+    F = 0.5|U| or 0.8|U|
+    budget = 0.1F or 0.2F
+
+Graph families:
+    dis2:
+        geometric/spatial graph from hypergraph.py
+    natural_hierarchy:
+        stochastic community/subcommunity graph
+
+Algorithms:
+    pure_greedy
+    original_hmetis
+    hmetis_refine
+    pure_tabu
+
+Change the CONFIG below to run larger/smaller experiments.
+"""
+
+
+CONFIG = {
+    # dis2_uniform is unweighted. dis2_weighted uses vertex weights 1..10,
+    # matching the weighted option from the paper.
+    "graph_types": ["dis2_weighted"],
+    "results_file": "mcp_two_graph_compare_results.csv",
+    "summary_file": "mcp_two_graph_compare_summary.csv",
+    "hmetis_file": "mcp_two_graph_compare.hgr",
+
+    # LP is useful for small instances only. For bigger cases, compare final
+    # coverage and runtime instead.
+    "solve_lp_when_enabled": True,
+    "lp_time_limit_s": 20,
+    "lp_max_nvtxs": 500,
+    "lp_max_nhedges": 400,
+}
+
+
+SCENARIOS = [
+    # Paper-style small cases. LP is feasible here.
+    {"name": "paper_tiny_F0.5_B0.1", "nvtxs": 100, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_tiny_F0.8_B0.1", "nvtxs": 100, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 4},
+    {"name": "paper_small_F0.5_B0.1", "nvtxs": 150, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_small_F0.8_B0.1", "nvtxs": 150, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
+    {"name": "paper_small_F0.5_B0.1", "nvtxs": 200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_small_F0.8_B0.1", "nvtxs": 200, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
+
+    # Medium cases. LP is usually too slow; use quality/runtime comparison.
+    {"name": "medium_F0.5_B0.1", "nvtxs": 1200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    #{"name": "medium_F0.8_B0.1", "nvtxs": 1200, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
+    {"name": "large_F0.5_B0.1", "nvtxs": 2400, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    #{"name": "large_F0.8_B0.1", "nvtxs": 2400, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
+    {"name": "large_F0.5_B0.1", "nvtxs": 4800, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    #{"name": "large_F0.8_B0.1", "nvtxs": 4800, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
+
+
+    # Keep these disabled unless you really want to test paper's larger budget.
+    # On natural_hierarchy they often cover all vertices, making algorithms tie.
+    # {"name": "paper_small_F0.5_B0.2", "nvtxs": 500, "f_ratio": 0.5, "budget_ratio": 0.2, "runs": 3, "solve_lp": True, "nparts": 8},
+    # {"name": "medium_F0.8_B0.2", "nvtxs": 1200, "f_ratio": 0.8, "budget_ratio": 0.2, "runs": 3, "solve_lp": False, "nparts": 16},
+]
+
+
+GRAPH_BUILDERS = {
+    "dis2_uniform": {
+        "fn": build_dis2_graph,
+        # rmax controls spatial edge size. 0.035 was used in earlier tests.
+        "kwargs": {"rmax": 0.1, "weight_mode": "uniform"},
+    },
+    "dis2_weighted": {
+        "fn": build_dis2_graph,
+        "kwargs": {"rmax": 0.1, "weight_mode": "paper_1_10"},
+    },
+    "natural_hierarchy": {
+        "fn": build_natural_hierarchy_graph,
+        "kwargs": {},
+    },
+}
+
+
+ALGORITHMS = {
+    "pure_greedy": {
+        "kind": "greedy",
+    },
+    "original_hmetis": {
+        "kind": "hmetis",
+        "nparts": "scenario",
+    },
+    "hmetis_refine": {
+        "kind": "refine",
+        "nparts": "scenario",
+        "top_per_partition": 4,
+        "min_gain_ratio": 0.70,
+        "refine_top_per_partition": 10,
+        "refine_rounds": 5,
+    },
+    "pure_tabu": {
+        "kind": "tabu",
+        "max_iter": 240,
+        "tabu_tenure": 25,
+        "candidate_pool_size": 160,
+        "random_candidate_size": 30,
+        "no_improve_limit": 80,
+    },
+}
+
+
+ALGO_ORDER = {
+    "pure_greedy": 1,
+    "original_hmetis": 2,
+    "hmetis_refine": 3,
+    "pure_tabu": 4,
+}
+
+
+def scenario_nparts(scenario):
+    if "nparts" in scenario and scenario["nparts"] is not None:
+        return scenario["nparts"]
+    if scenario["nhedges"] <= 200:
+        return 4
+    if scenario["nhedges"] <= 600:
+        return 8
+    return 16
+
+
+def resolved_algo_config(config, scenario):
+    resolved = dict(config)
+    if resolved.get("nparts") == "scenario":
+        resolved["nparts"] = scenario_nparts(scenario)
+    return resolved
+
+
+def build_graph(graph_type, nhedges, nvtxs, seed):
+    builder = GRAPH_BUILDERS[graph_type]
+    hg, meta = builder["fn"](
+        nhedges=nhedges,
+        nvtxs=nvtxs,
+        seed=seed,
+        **builder["kwargs"],
+    )
+    meta["graph_type"] = graph_type
+    return hg, meta
+
+
+def covered_weight(hg, covered_vertices):
+    return sum(hg.vtx_weights[v] for v in covered_vertices)
+
+
+def run_algo(hg, budget, algo_name, config, seed):
+    start = time.time()
+    filename = CONFIG["hmetis_file"]
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        kind = config["kind"]
+        cfg = {k: v for k, v in config.items() if k != "kind"}
+
+        if kind == "greedy":
+            result = pure_greedy_mcp(hg, budget=budget, filename=filename)
+        elif kind == "hmetis":
+            result = hmetis_mcp(
+                hg,
+                budget=budget,
+                filename=filename,
+                timeout=45,
+                **cfg,
+            )
+        elif kind == "refine":
+            result = hmetis_mcp_refine(
+                hg,
+                budget=budget,
+                filename=filename,
+                timeout=45,
+                verbose=False,
+                **cfg,
+            )
+        elif kind == "tabu":
+            result = pure_tabu_mcp(
+                hg,
+                budget=budget,
+                filename=filename,
+                seed=seed,
+                verbose=False,
+                **cfg,
+            )
+        else:
+            raise ValueError(f"unknown algorithm kind: {kind}")
+
+    overlap = _compute_overlap(hg, result[2])
+    return {
+        "coverage": len(result[1]),
+        "weighted_coverage": round(covered_weight(hg, result[1]), 6),
+        "coverage_fraction": round(len(result[1]) / hg.nvtxs, 5),
+        "solution_size": len(result[2]),
+        "overlap_ratio": overlap["overlap_ratio"],
+        "multi_covered_vertices": overlap["multi_covered_vertices"],
+        "time_s": round(time.time() - start, 4),
+    }
+
+
+def iter_scenarios():
+    for scenario_idx, size_cfg in enumerate(SCENARIOS, start=1):
+        nvtxs = size_cfg["nvtxs"]
+        f_ratio = size_cfg["f_ratio"]
+        budget_ratio = size_cfg["budget_ratio"]
+        nhedges = max(1, int(f_ratio * nvtxs))
+        budget = max(1, int(budget_ratio * nhedges))
+        for graph_type in CONFIG["graph_types"]:
+            for run in range(1, size_cfg.get("runs", 1) + 1):
+                seed = 200_000 + 10_000 * run + 1_000 * scenario_idx + nvtxs
+                scenario = {
+                    "scenario_name": size_cfg["name"],
+                    "graph_type": graph_type,
+                    "nvtxs": nvtxs,
+                    "nhedges": nhedges,
+                    "f_ratio": f_ratio,
+                    "budget_ratio": budget_ratio,
+                    "budget": budget,
+                    "run": run,
+                    "seed": seed,
+                    "solve_lp": size_cfg.get("solve_lp", False),
+                }
+                scenario["nparts"] = scenario_nparts({**scenario, **size_cfg})
+                yield scenario
+
+
+def maybe_solve_lp(hg, scenario):
+    if not CONFIG["solve_lp_when_enabled"] or not scenario.get("solve_lp"):
+        return {"optimal_value": None, "optimal_status": None, "lp_time_s": None}
+    if hg.nvtxs > CONFIG["lp_max_nvtxs"] or hg.nhedges > CONFIG["lp_max_nhedges"]:
+        return {"optimal_value": None, "optimal_status": "skipped_size", "lp_time_s": None}
+
+    start = time.time()
+    result = optimal_solu_detail(
+        hg,
+        budget=scenario["budget"],
+        time_limit=CONFIG["lp_time_limit_s"],
+        msg=False,
+    )
+    return {
+        "optimal_value": result["objective"],
+        "optimal_status": result["status"],
+        "lp_time_s": round(time.time() - start, 4),
+    }
+
+
+def reached_optimal(coverage, optimal_value):
+    if optimal_value is None:
+        return None
+    return int(abs(coverage - optimal_value) <= 1e-6)
+
+
+def main():
+    rows = []
+
+    for scenario in iter_scenarios():
+        random.seed(scenario["seed"])
+        np.random.seed(scenario["seed"])
+        hg, graph_meta = build_graph(
+            graph_type=scenario["graph_type"],
+            nhedges=scenario["nhedges"],
+            nvtxs=scenario["nvtxs"],
+            seed=scenario["seed"],
+        )
+        lp_meta = maybe_solve_lp(hg, scenario)
+
+        run_metrics = {}
+        for algo_name, algo_config in ALGORITHMS.items():
+            resolved_config = resolved_algo_config(algo_config, scenario)
+            metrics = run_algo(
+                hg=hg,
+                budget=scenario["budget"],
+                algo_name=algo_name,
+                config=resolved_config,
+                seed=scenario["seed"],
+            )
+            run_metrics[algo_name] = metrics
+            print(
+                f"[done] graph={scenario['graph_type']} "
+                f"scenario={scenario['scenario_name']} "
+                f"|U|={scenario['nvtxs']} F={scenario['nhedges']} "
+                f"budget={scenario['budget']} nparts={scenario['nparts']} "
+                f"run={scenario['run']} "
+                f"{algo_name} coverage={metrics['coverage']} "
+                f"weighted={metrics['weighted_coverage']} "
+                f"time={metrics['time_s']}s",
+                flush=True,
+            )
+
+        greedy = run_metrics["pure_greedy"]
+        tabu = run_metrics.get("pure_tabu")
+        tabu_gain = None
+        if tabu is not None:
+            tabu_gain = tabu["weighted_coverage"] - greedy["weighted_coverage"]
+
+        for algo_name, metrics in run_metrics.items():
+            hmetis_gain_capture = None
+            if algo_name == "hmetis_refine" and tabu_gain and tabu_gain > 0:
+                hmetis_gain_capture = round(
+                    (metrics["weighted_coverage"] - greedy["weighted_coverage"]) / tabu_gain,
+                    5,
+                )
+
+            rows.append({
+                **scenario,
+                **graph_meta,
+                **lp_meta,
+                "algo_name": algo_name,
+                "algo_order": ALGO_ORDER[algo_name],
+                "coverage_delta_greedy": metrics["coverage"] - greedy["coverage"],
+                "weighted_delta_greedy": round(
+                    metrics["weighted_coverage"] - greedy["weighted_coverage"],
+                    6,
+                ),
+                "overlap_delta_greedy": round(
+                    metrics["overlap_ratio"] - greedy["overlap_ratio"], 5
+                ),
+                "coverage_delta_tabu": (
+                    metrics["coverage"] - tabu["coverage"] if tabu is not None else None
+                ),
+                "weighted_delta_tabu": (
+                    round(metrics["weighted_coverage"] - tabu["weighted_coverage"], 6)
+                    if tabu is not None else None
+                ),
+                "hmetis_gain_capture_of_tabu": hmetis_gain_capture,
+                # Paper-style performance: solution quality divided by optimal
+                # solution quality, when LP was solved for this instance.
+                "performance": (
+                    round(metrics["weighted_coverage"] / lp_meta["optimal_value"], 5)
+                    if lp_meta["optimal_value"] else None
+                ),
+                "reached_optimal": reached_optimal(
+                    metrics["weighted_coverage"],
+                    lp_meta["optimal_value"],
+                ),
+                **metrics,
+            })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(CONFIG["results_file"], index=False)
+
+    summary = (
+        df
+        .groupby(
+            [
+                "scenario_name",
+                "graph_type",
+                "nvtxs",
+                "nhedges",
+                "budget",
+                "nparts",
+                "f_ratio",
+                "budget_ratio",
+                "graph_family",
+                "weight_mode",
+                "algo_order",
+                "algo_name",
+            ],
+            as_index=False,
+        )
+        .agg(
+            runs=("run", "count"),
+            avg_coverage=("coverage", "mean"),
+            avg_weighted_coverage=("weighted_coverage", "mean"),
+            avg_delta_greedy=("coverage_delta_greedy", "mean"),
+            avg_weighted_delta_greedy=("weighted_delta_greedy", "mean"),
+            wins_vs_greedy=("coverage_delta_greedy", lambda s: int((s > 0).sum())),
+            ties_vs_greedy=("coverage_delta_greedy", lambda s: int((s == 0).sum())),
+            losses_vs_greedy=("coverage_delta_greedy", lambda s: int((s < 0).sum())),
+            weighted_wins_vs_greedy=("weighted_delta_greedy", lambda s: int((s > 0).sum())),
+            weighted_ties_vs_greedy=("weighted_delta_greedy", lambda s: int((s == 0).sum())),
+            weighted_losses_vs_greedy=("weighted_delta_greedy", lambda s: int((s < 0).sum())),
+            avg_overlap_delta_greedy=("overlap_delta_greedy", "mean"),
+            avg_time_s=("time_s", "mean"),
+            avg_hmetis_gain_capture=("hmetis_gain_capture_of_tabu", "mean"),
+            avg_performance=("performance", "mean"),
+            std_performance=("performance", "std"),
+            fraction_optimal=("reached_optimal", "mean"),
+            optimal_runs=("reached_optimal", "count"),
+            lp_status=("optimal_status", lambda s: ",".join(sorted({str(v) for v in s.dropna()}))),
+            avg_lp_time_s=("lp_time_s", "mean"),
+        )
+        .sort_values(
+            [
+                "graph_type",
+                "nvtxs",
+                "nhedges",
+                "budget",
+                "nparts",
+                "algo_order",
+            ],
+            ascending=[True, True, True, True, True, True],
+        )
+    )
+    summary = summary.drop(columns=["algo_order"])
+
+    print("\n=== Summary ===")
+    print(summary.to_string(index=False))
+    summary.to_csv(CONFIG["summary_file"], index=False)
+    print(f"\nSaved detailed rows to {CONFIG['results_file']}")
+    print(f"Saved averaged summary to {CONFIG['summary_file']}")
+
+
+if __name__ == "__main__":
+    main()
