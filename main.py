@@ -6,7 +6,13 @@ import time
 import numpy as np
 import pandas as pd
 
-from algo import hmetis_mcp, hmetis_mcp_refine, pure_greedy_mcp, pure_tabu_mcp
+from algo import (
+    hmetis_mcp,
+    hmetis_mcp_refine,
+    pure_greedy_mcp,
+    pure_oblswap_mcp,
+    pure_tabu_mcp,
+)
 from evaluation import _compute_overlap
 from graph_generators import build_dis2_graph, build_natural_hierarchy_graph
 from optimal import optimal_solu_detail
@@ -56,19 +62,19 @@ CONFIG = {
 
 SCENARIOS = [
     # Paper-style small cases. LP is feasible here.
-    {"name": "paper_tiny_F0.5_B0.1", "nvtxs": 100, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_tiny_F0.5_B0.1", "nvtxs": 100, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
     #{"name": "paper_tiny_F0.8_B0.1", "nvtxs": 100, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 4},
-    {"name": "paper_small_F0.5_B0.1", "nvtxs": 150, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_small_F0.5_B0.1", "nvtxs": 150, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
     #{"name": "paper_small_F0.8_B0.1", "nvtxs": 150, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
-    {"name": "paper_small_F0.5_B0.1", "nvtxs": 200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 8},
+    #{"name": "paper_small_F0.5_B0.1", "nvtxs": 200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 1000, "solve_lp": True, "nparts": 8},
     #{"name": "paper_small_F0.8_B0.1", "nvtxs": 200, "f_ratio": 0.8, "budget_ratio": 0.1, "runs": 3, "solve_lp": True, "nparts": 8},
 
     # Medium cases. LP is usually too slow; use quality/runtime comparison.
-    {"name": "medium_F0.5_B0.1", "nvtxs": 1200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    {"name": "medium_F0.5_B0.1", "nvtxs": 1200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
     #{"name": "medium_F0.8_B0.1", "nvtxs": 1200, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
-    {"name": "large_F0.5_B0.1", "nvtxs": 2400, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    {"name": "large_F0.5_B0.1", "nvtxs": 2400, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
     #{"name": "large_F0.8_B0.1", "nvtxs": 2400, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
-    {"name": "large_F0.5_B0.1", "nvtxs": 4800, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 50, "solve_lp": False, "nparts": 16},
+    {"name": "large_F0.5_B0.1", "nvtxs": 4800, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
     #{"name": "large_F0.8_B0.1", "nvtxs": 4800, "f_ratio": 0.8, "budget_ratio": 0.05, "runs": 3, "solve_lp": False, "nparts": 16},
 
 
@@ -83,7 +89,11 @@ GRAPH_BUILDERS = {
     "dis2_uniform": {
         "fn": build_dis2_graph,
         # rmax controls spatial edge size. 0.035 was used in earlier tests.
-        "kwargs": {"rmax": 0.1, "weight_mode": "uniform"},
+        "kwargs": {"rmax": 0.035, "weight_mode": "uniform"},
+    },
+    "dis2_unweighted": {
+        "fn": build_dis2_graph,
+        "kwargs": {"rmax": 0.035, "weight_mode": "uniform"},
     },
     "dis2_weighted": {
         "fn": build_dis2_graph,
@@ -98,27 +108,35 @@ GRAPH_BUILDERS = {
 
 ALGORITHMS = {
     "pure_greedy": {
-        "kind": "greedy",
-    },
+        "kind": "greedy",},
     "original_hmetis": {
         "kind": "hmetis",
-        "nparts": "scenario",
-    },
+        "nparts": "scenario",},
     "hmetis_refine": {
         "kind": "refine",
         "nparts": "scenario",
         "top_per_partition": 4,
-        "min_gain_ratio": 0.70,
+       "min_gain_ratio": 0.70,
         "refine_top_per_partition": 10,
         "refine_rounds": 5,
+    },
+    "pure_oblswap": {
+        "kind": "oblswap",
+        "max_iter": 200,
+        # Set to None for exact full 1-swap search. Use a number like 200 if
+        # full search becomes too slow on larger instances.
+        "candidate_pool_size": None,
     },
     "pure_tabu": {
         "kind": "tabu",
         "max_iter": 240,
-        "tabu_tenure": 25,
-        "candidate_pool_size": 160,
-        "random_candidate_size": 30,
-        "no_improve_limit": 80,
+        # Paper parameters: L = 50 and NT = 50 for MCP.
+        "tabu_tenure": 50,
+        # None means full one-swap neighborhood, matching the paper more
+        # closely. Use a number if larger instances become too slow.
+        "candidate_pool_size": None,
+        "random_candidate_size": 0,
+        "no_improve_limit": 50,
     },
 }
 
@@ -127,7 +145,8 @@ ALGO_ORDER = {
     "pure_greedy": 1,
     "original_hmetis": 2,
     "hmetis_refine": 3,
-    "pure_tabu": 4,
+    "pure_oblswap": 4,
+    "pure_tabu": 5,
 }
 
 
@@ -188,6 +207,14 @@ def run_algo(hg, budget, algo_name, config, seed):
                 budget=budget,
                 filename=filename,
                 timeout=45,
+                verbose=False,
+                **cfg,
+            )
+        elif kind == "oblswap":
+            result = pure_oblswap_mcp(
+                hg,
+                budget=budget,
+                filename=filename,
                 verbose=False,
                 **cfg,
             )

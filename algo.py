@@ -1,6 +1,7 @@
 
 
 import subprocess, time
+from collections import deque
 import numpy as np
 from subgraph2 import HgrWriter, write_hgr
 
@@ -1061,17 +1062,86 @@ def pure_greedy_mcp(hg, budget, filename=None, **kwargs):
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, None, None, stages
 
 
-def pure_tabu_mcp(hg, budget, filename=None, max_iter=250, tabu_tenure=25,
-                  candidate_pool_size=120, random_candidate_size=30,
-                  no_improve_limit=80, allow_non_improving=True, seed=0,
+def pure_oblswap_mcp(hg, budget, filename=None, max_iter=200,
+                     candidate_pool_size=None, min_swap_gain=1e-9,
+                     verbose=False, **kwargs):
+    """
+    Oblivious 1-swap local search.
+
+    Starts from Greedy and repeatedly performs the best improving one-in,
+    one-out swap according to the true MCP objective w(Y). This is the k=1
+    version of OblSwap from the paper.
+    """
+    start_time = time.time()
+    tracker = _StageTrackerMCP(budget, start_time)
+
+    _, covered_vertices, selected_edges, *_ = pure_greedy_mcp(hg, budget, filename)
+    selected_edges = set(selected_edges)
+    cover_counts = _solution_cover_counts(hg, selected_edges)
+    tracker.check(selected_edges, set(cover_counts))
+
+    for iteration in range(1, max_iter + 1):
+        if not selected_edges:
+            break
+
+        scores = _build_scores(hg, set(cover_counts), selected_edges)
+        candidates = [edge for edge in hg.hedges
+                      if edge not in selected_edges and scores[edge] > 0]
+        if not candidates:
+            break
+
+        if candidate_pool_size is not None:
+            candidates = sorted(
+                candidates,
+                key=lambda edge: scores[edge],
+                reverse=True,
+            )[:candidate_pool_size]
+
+        best_in = None
+        best_out = None
+        best_gain = min_swap_gain
+
+        for in_edge in candidates:
+            for out_edge in selected_edges:
+                gain = _replacement_gain(hg, cover_counts, in_edge, out_edge)
+                if gain > best_gain:
+                    best_gain = gain
+                    best_in = in_edge
+                    best_out = out_edge
+
+        if best_in is None:
+            break
+
+        selected_edges.remove(best_out)
+        selected_edges.add(best_in)
+        cover_counts = _solution_cover_counts(hg, selected_edges)
+        covered_vertices = set(cover_counts)
+        tracker.check(selected_edges, covered_vertices)
+
+        if verbose:
+            print(f"[oblswap] iter={iteration}, gain={best_gain:.4f}, "
+                  f"covered={len(covered_vertices)}")
+
+    final_time = round(time.time() - start_time, 4)
+    final_coverage = len(covered_vertices)
+    stages = tracker.result(len(selected_edges), final_coverage, final_time)
+
+    return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, None, None, stages
+
+
+def pure_tabu_mcp(hg, budget, filename=None, max_iter=250, tabu_tenure=50,
+                  candidate_pool_size=None, random_candidate_size=0,
+                  no_improve_limit=50, allow_non_improving=True, seed=0,
                   verbose=False, **kwargs):
     """
-    Tabu-style 1-swap local search baseline for MCP.
+    Tabu 1-swap local search for the standard MCP.
 
-    Starts from greedy, repeatedly swaps one selected edge with one unselected
-    edge, and keeps the best solution ever seen. The tabu list prevents recently
-    removed edges from immediately returning, unless the move beats the best
-    solution found so far.
+    This follows the paper's Tabu structure for the standard cardinality MCP:
+    start from Greedy, repeatedly choose the best non-tabu neighbor, store recent
+    solutions in the tabu list, keep the best feasible solution, and terminate
+    after the best solution has not strictly improved for no_improve_limit
+    iterations. In the paper's notation, tabu_tenure is L and
+    no_improve_limit is NT.
     """
     start_time = time.time()
     tracker = _StageTrackerMCP(budget, start_time)
@@ -1084,7 +1154,8 @@ def pure_tabu_mcp(hg, budget, filename=None, max_iter=250, tabu_tenure=25,
     best_value = current_value
     best_edges = set(selected_edges)
     best_covered = set(cover_counts)
-    tabu_until = {}
+    tabu_list = deque()
+    tabu_set = set()
     no_improve = 0
 
     tracker.check(selected_edges, best_covered)
@@ -1093,34 +1164,41 @@ def pure_tabu_mcp(hg, budget, filename=None, max_iter=250, tabu_tenure=25,
         if no_improve >= no_improve_limit:
             break
 
-        scores = _build_scores(hg, set(cover_counts), selected_edges)
-        eligible = [edge for edge in hg.hedges
-                    if edge not in selected_edges and scores[edge] > 0]
+        eligible = [edge for edge in hg.hedges if edge not in selected_edges]
         if not eligible or not selected_edges:
             break
 
-        ranked = sorted(eligible, key=lambda edge: scores[edge], reverse=True)
-        candidates = ranked[:candidate_pool_size]
-        if random_candidate_size > 0 and len(ranked) > candidate_pool_size:
-            tail = ranked[candidate_pool_size:]
-            sample_size = min(random_candidate_size, len(tail))
-            sampled = rng.choice(tail, size=sample_size, replace=False)
-            candidates.extend(int(edge) for edge in sampled)
+        if candidate_pool_size is None:
+            candidates = eligible
+        else:
+            scores = _build_scores(hg, set(cover_counts), selected_edges)
+            ranked = sorted(eligible, key=lambda edge: scores[edge], reverse=True)
+            candidates = ranked[:candidate_pool_size]
+            if random_candidate_size > 0 and len(ranked) > candidate_pool_size:
+                tail = ranked[candidate_pool_size:]
+                sample_size = min(random_candidate_size, len(tail))
+                sampled = rng.choice(tail, size=sample_size, replace=False)
+                candidates.extend(int(edge) for edge in sampled)
 
         best_move = None
         best_move_gain = -np.inf
+        best_move_value = -np.inf
+        best_move_solution = None
 
         for in_edge in candidates:
             for out_edge in selected_edges:
-                gain = _replacement_gain(hg, cover_counts, in_edge, out_edge)
-                aspiration = current_value + gain > best_value
-                if tabu_until.get(in_edge, 0) > iteration and not aspiration:
+                neighbor = frozenset((selected_edges - {out_edge}) | {in_edge})
+                if neighbor in tabu_set:
                     continue
+                gain = _replacement_gain(hg, cover_counts, in_edge, out_edge)
                 if not allow_non_improving and gain <= 0:
                     continue
-                if gain > best_move_gain:
+                value = current_value + gain
+                if value > best_move_value:
+                    best_move_value = value
                     best_move_gain = gain
                     best_move = (in_edge, out_edge)
+                    best_move_solution = neighbor
 
         if best_move is None:
             break
@@ -1128,7 +1206,12 @@ def pure_tabu_mcp(hg, budget, filename=None, max_iter=250, tabu_tenure=25,
         in_edge, out_edge = best_move
         selected_edges.remove(out_edge)
         selected_edges.add(in_edge)
-        tabu_until[out_edge] = iteration + tabu_tenure
+
+        tabu_list.append(best_move_solution)
+        tabu_set.add(best_move_solution)
+        if len(tabu_list) > tabu_tenure:
+            expired = tabu_list.popleft()
+            tabu_set.remove(expired)
 
         cover_counts = _solution_cover_counts(hg, selected_edges)
         current_value = _coverage_weight(hg, cover_counts)
