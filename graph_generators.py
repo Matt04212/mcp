@@ -102,8 +102,8 @@ def build_natural_hierarchy_graph(
     seed,
     n_communities=None,
     subcommunities_per_community=None,
-    max_edge_ratio=0.035,
-    max_edge_cap=140,
+    max_edge_ratio=0.022,
+    max_edge_cap=90,
 ):
     """
     Stochastic hierarchical community graph.
@@ -137,9 +137,9 @@ def build_natural_hierarchy_graph(
         community_tail.append(tail)
 
     # Keep hierarchy edges useful but avoid saturating the whole universe when
-    # F=0.8|U|. A high lower bound makes small/medium cases too easy because
-    # every selected edge covers many vertices.
-    max_edge_size = max(50, min(max_edge_cap, int(max_edge_ratio * nvtxs)))
+    # F=0.8|U|. The cap scales with |U|, but the lower bound stays modest so
+    # small/medium instances do not become automatically full-covered.
+    max_edge_size = max(20, min(max_edge_cap, int(max_edge_ratio * nvtxs)))
     n_global = int(0.14 * nhedges)
     n_community = int(0.28 * nhedges)
     n_local = int(0.44 * nhedges)
@@ -158,8 +158,8 @@ def build_natural_hierarchy_graph(
         for community_idx in active:
             pop_pool = community_popular[community_idx]
             tail_pool = community_tail[community_idx]
-            edge.update(_sample(rng, pop_pool, max(2, int(0.07 * len(pop_pool)))))
-            edge.update(_sample(rng, tail_pool, max(1, int(0.012 * len(tail_pool)))))
+            edge.update(_sample(rng, pop_pool, max(1, int(0.045 * len(pop_pool)))))
+            edge.update(_sample(rng, tail_pool, max(1, int(0.006 * len(tail_pool)))))
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 
     # Community edges: medium coverage within one community.
@@ -174,14 +174,14 @@ def build_natural_hierarchy_graph(
         )
         for sub_idx in active_subs:
             sub = subs[sub_idx]
-            low = max(3, int(0.18 * len(sub)))
-            high = max(4, int(0.35 * len(sub)))
+            low = max(2, int(0.10 * len(sub)))
+            high = max(3, int(0.22 * len(sub)))
             edge.update(_sample(rng, sub, int(rng.integers(low, high))))
         edge.update(
             _sample(
                 rng,
                 community_popular[community_idx],
-                max(2, int(0.03 * len(community_popular[community_idx]))),
+                max(1, int(0.018 * len(community_popular[community_idx]))),
             )
         )
         hedges.append(_cap_edge(rng, edge, max_edge_size))
@@ -191,7 +191,7 @@ def build_natural_hierarchy_graph(
         community_idx = int(rng.integers(0, n_communities))
         sub_idx = int(rng.integers(0, subcommunities_per_community))
         sub = subcommunities[community_idx][sub_idx]
-        local_ratio = rng.uniform(0.45, 0.78)
+        local_ratio = rng.uniform(0.25, 0.48)
         edge = _sample(rng, sub, max(2, int(local_ratio * len(sub))))
 
         if rng.random() < 0.25:
@@ -200,7 +200,7 @@ def build_natural_hierarchy_graph(
                 max(0, sub_idx + rng.choice([-1, 1])),
             )
             neighbor = subcommunities[community_idx][neighbor_idx]
-            edge.update(_sample(rng, neighbor, max(1, int(0.06 * len(neighbor)))))
+            edge.update(_sample(rng, neighbor, max(1, int(0.03 * len(neighbor)))))
 
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 
@@ -216,7 +216,7 @@ def build_natural_hierarchy_graph(
             sub = subcommunities[community_idx][
                 int(rng.integers(0, subcommunities_per_community))
             ]
-            high = max(3, int(0.12 * len(sub)))
+            high = max(3, int(0.07 * len(sub)))
             edge.update(_sample(rng, sub, max(2, int(rng.integers(2, high)))))
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 
