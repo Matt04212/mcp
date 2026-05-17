@@ -204,6 +204,10 @@ def _hmetis_fixed_partitions(hg, filename, nparts, timeout):
     with open(f"{filename}.part.{cur_nparts}") as f:
         line = f.read().splitlines()
     if len(line) != len(e_map_inv):
+        print(
+            f"  [warn] hMETIS partition line count mismatch: "
+            f"expected {len(e_map_inv)}, got {len(line)}"
+        )
         return {}, 0.0, partition_time
 
     p2 = time.time()
@@ -340,8 +344,8 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         result = subprocess.run(
-            ["./hmetis", filename, str(nparts), "5", "1", "5", "3", "1", "0", "0"],
-            timeout=timeout, capture_output=False, text=True
+            ["./hmetis", filename, str(nparts), "5", "1", "1", "3", "1", "0", "0"],
+            timeout=timeout, capture_output=True, text=True
         )
     except subprocess.TimeoutExpired:
         print(f"  [warn] hMETIS timed out after {timeout}s")
@@ -350,8 +354,11 @@ def _run_hmetis(filename, nparts, timeout=120):
     # check if hMETIS actually wrote the file
     if not os.path.exists(part_file):
         if result.returncode != 0:
-            stderr = result.stderr.strip()
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
             detail = f": {stderr}" if stderr else ""
+            if not detail and stdout:
+                detail = f": {stdout.splitlines()[-1]}"
             print(f"  [warn] hMETIS exited with code {result.returncode}{detail}")
         print(f"  [warn] hMETIS did not produce partition file ??likely crashed")
         return False
