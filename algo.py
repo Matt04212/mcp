@@ -1,6 +1,8 @@
 
 import heapq
+import multiprocessing
 import subprocess, time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
 import numpy as np
 from subgraph2 import HgrWriter, write_hgr
@@ -299,6 +301,13 @@ def _local_greedy_on_edges(hg, part_edges, budget):
     return covered_vertices, selected_edges
 
 
+def _local_greedy_partition_worker(args):
+    part, hg, part_edges, budget = args
+    start = time.time()
+    _, local_selected = _local_greedy_on_edges(hg, part_edges, budget)
+    return part, local_selected, time.time() - start
+
+
 def _parse_partitions(line, e_map_inv):
     partitions = {}
     for edge, part in enumerate(line, start=1):
@@ -344,7 +353,7 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         result = subprocess.run(
-            ["./hmetis", filename, str(nparts), "5", "1", "1", "3", "1", "0", "0"],
+            ["./hmetis", filename, str(nparts), "5", "1", "5", "3", "1", "0", "0"],
             timeout=timeout, capture_output=True, text=True
         )
     except subprocess.TimeoutExpired:
@@ -622,6 +631,7 @@ def hmetis_partitioned_greedy_mcp(
     timeout=120,
     budget_mode="equal",
     fallback_to_greedy=False,
+    max_workers=None,
     **kwargs,
 ):
     """
@@ -651,19 +661,58 @@ def hmetis_partitioned_greedy_mcp(
     partition_selected_counts = {}
     local_greedy_time = 0.0
     local_partition_times = {}
+    worker_count = min(len(partitions), max_workers or len(partitions))
+    local_wall_start = time.time()
 
-    for part, part_edges in partitions.items():
-        local_start = time.time()
-        _, local_selected = _local_greedy_on_edges(
-            hg,
-            part_edges,
-            budgets.get(part, 0),
-        )
-        part_time = time.time() - local_start
-        local_greedy_time += part_time
-        local_partition_times[part] = round(part_time, 4)
-        partition_selected_counts[part] = len(local_selected)
-        selected_edges.update(local_selected)
+    if worker_count <= 1:
+        for part, part_edges in partitions.items():
+            local_start = time.time()
+            _, local_selected = _local_greedy_on_edges(
+                hg,
+                part_edges,
+                budgets.get(part, 0),
+            )
+            part_time = time.time() - local_start
+            local_greedy_time += part_time
+            local_partition_times[part] = round(part_time, 4)
+            partition_selected_counts[part] = len(local_selected)
+            selected_edges.update(local_selected)
+    else:
+        try:
+            mp_context = None
+            try:
+                mp_context = multiprocessing.get_context("fork")
+            except ValueError:
+                mp_context = multiprocessing.get_context()
+
+            tasks = [
+                (part, hg, part_edges, budgets.get(part, 0))
+                for part, part_edges in partitions.items()
+            ]
+            with ProcessPoolExecutor(max_workers=worker_count, mp_context=mp_context) as executor:
+                futures = [executor.submit(_local_greedy_partition_worker, task) for task in tasks]
+                for future in as_completed(futures):
+                    part, local_selected, part_time = future.result()
+                    local_greedy_time += part_time
+                    local_partition_times[part] = round(part_time, 4)
+                    partition_selected_counts[part] = len(local_selected)
+                    selected_edges.update(local_selected)
+        except (OSError, PermissionError) as exc:
+            print(f"  [warn] process pool unavailable, falling back to sequential local greedy: {exc}")
+            worker_count = 1
+            for part, part_edges in partitions.items():
+                local_start = time.time()
+                _, local_selected = _local_greedy_on_edges(
+                    hg,
+                    part_edges,
+                    budgets.get(part, 0),
+                )
+                part_time = time.time() - local_start
+                local_greedy_time += part_time
+                local_partition_times[part] = round(part_time, 4)
+                partition_selected_counts[part] = len(local_selected)
+                selected_edges.update(local_selected)
+    local_wall_time = time.time() - local_wall_start
 
     merge_start = time.time()
     covered_vertices = set()
@@ -695,7 +744,9 @@ def hmetis_partitioned_greedy_mcp(
         "partition_selected_counts": str(
             [(part, partition_selected_counts.get(part, 0)) for part in sorted(partitions)]
         ),
+        "partition_worker_count": worker_count,
         "partition_local_greedy_time(s)": round(local_greedy_time, 4),
+        "partition_local_wall_time(s)": round(local_wall_time, 4),
         "partition_estimated_parallel_local_time(s)": round(estimated_parallel_local_time, 4),
         "partition_merge_time(s)": round(merge_time, 4),
         "partition_local_times": str(
