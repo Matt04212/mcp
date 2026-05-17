@@ -189,6 +189,105 @@ def _hmetis_candidate_pool(hg, filename, selected_edges, covered_vertices,
     return list(candidates), parse_time, partition_time
 
 
+def _hmetis_fixed_partitions(hg, filename, nparts, timeout):
+    e_map_inv = write_hgr(hg, set(), set(), filename)
+    cur_nparts = min(nparts, len(e_map_inv))
+    if cur_nparts <= 1:
+        return {}, 0.0, 0.0
+
+    p = time.time()
+    ok = _run_hmetis(filename, cur_nparts, timeout=timeout)
+    partition_time = time.time() - p
+    if not ok:
+        return {}, 0.0, partition_time
+
+    with open(f"{filename}.part.{cur_nparts}") as f:
+        line = f.read().splitlines()
+    if len(line) != len(e_map_inv):
+        return {}, 0.0, partition_time
+
+    p2 = time.time()
+    partitions = _parse_partitions(line, e_map_inv)
+    parse_time = time.time() - p2
+    return partitions, parse_time, partition_time
+
+
+def _allocate_partition_budgets(partitions, budget, mode="equal"):
+    part_ids = sorted(partitions)
+    if not part_ids or budget <= 0:
+        return {part: 0 for part in part_ids}
+
+    if mode == "equal":
+        ordered = sorted(part_ids, key=lambda part: (-len(partitions[part]), part))
+        base = budget // len(ordered)
+        remainder = budget % len(ordered)
+        return {
+            part: base + (1 if idx < remainder else 0)
+            for idx, part in enumerate(ordered)
+        }
+
+    if mode == "proportional":
+        total_edges = sum(len(partitions[part]) for part in part_ids)
+        if total_edges <= 0:
+            return {part: 0 for part in part_ids}
+        raw = {
+            part: budget * len(partitions[part]) / total_edges
+            for part in part_ids
+        }
+        budgets = {part: int(np.floor(value)) for part, value in raw.items()}
+        remaining = budget - sum(budgets.values())
+        ordered = sorted(part_ids, key=lambda part: (raw[part] - budgets[part], len(partitions[part])), reverse=True)
+        for part in ordered[:remaining]:
+            budgets[part] += 1
+        return budgets
+
+    raise ValueError(f"unknown budget allocation mode: {mode}")
+
+
+def _local_greedy_on_edges(hg, part_edges, budget):
+    part_edges = set(part_edges)
+    selected_edges = set()
+    covered_vertices = set()
+
+    if budget <= 0 or not part_edges:
+        return covered_vertices, selected_edges
+
+    scores = np.zeros(hg.nhedges + 1, dtype=np.float64)
+    for edge in part_edges:
+        scores[edge] = sum(hg.vtx_weights[vtx] for vtx in hg.hedges_dict[edge])
+
+    while len(selected_edges) < budget:
+        best_edge = None
+        best_score = 0.0
+        for edge in part_edges:
+            if edge in selected_edges:
+                continue
+            if scores[edge] > best_score:
+                best_edge = edge
+                best_score = scores[edge]
+
+        if best_edge is None or best_score <= 0:
+            break
+
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        if not newly_covered:
+            scores[best_edge] = -1.0
+            selected_edges.add(best_edge)
+            continue
+
+        covered_vertices.update(newly_covered)
+        selected_edges.add(best_edge)
+        scores[best_edge] = -1.0
+
+        for vtx in newly_covered:
+            weight = hg.vtx_weights[vtx]
+            for edge in hg.vtxs_dict[vtx]:
+                if edge in part_edges and edge not in selected_edges:
+                    scores[edge] -= weight
+
+    return covered_vertices, selected_edges
+
+
 def _parse_partitions(line, e_map_inv):
     partitions = {}
     for edge, part in enumerate(line, start=1):
@@ -501,6 +600,84 @@ def hmetis_mcp(hg, budget, filename, nparts=4, timeout=120,
     return (hg.nhedges, hg.nvtxs), covered_vertices, removed_edges, write_time, partition_time, stages
 
 
+def hmetis_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    fallback_to_greedy=False,
+    **kwargs,
+):
+    """
+    Partition edges once with hMETIS, then run greedy independently per partition.
+
+    Each partition has its own local covered set. The final solution is the
+    union of all local choices, evaluated on the original whole graph. This
+    models embarrassingly parallel greedy with no cross-partition coordination.
+    """
+    start_time = time.time()
+    partition_call_start = time.time()
+    partitions, parse_time, partition_time = _hmetis_fixed_partitions(
+        hg, filename, nparts, timeout
+    )
+    write_time = max(0.0, time.time() - partition_call_start - partition_time - parse_time)
+
+    if not partitions:
+        if fallback_to_greedy:
+            return pure_greedy_mcp(hg, budget=budget, filename=filename)
+        raise RuntimeError("hMETIS partitioning failed for partitioned greedy")
+
+    budgets = _allocate_partition_budgets(partitions, budget, mode=budget_mode)
+    selected_edges = set()
+    partition_edge_counts = {
+        part: len(part_edges) for part, part_edges in partitions.items()
+    }
+    partition_selected_counts = {}
+
+    for part, part_edges in partitions.items():
+        _, local_selected = _local_greedy_on_edges(
+            hg,
+            part_edges,
+            budgets.get(part, 0),
+        )
+        partition_selected_counts[part] = len(local_selected)
+        selected_edges.update(local_selected)
+
+    covered_vertices = set()
+    for edge in selected_edges:
+        covered_vertices.update(hg.hedges_dict[edge])
+
+    part_sizes = [len(edges) for edges in partitions.values()]
+    nonzero_budgets = [value for value in budgets.values() if value > 0]
+    stages = {
+        "partition_count": len(partitions),
+        "budget_mode": budget_mode,
+        "requested_nparts": nparts,
+        "min_partition_edges": min(part_sizes) if part_sizes else None,
+        "mean_partition_edges": round(float(np.mean(part_sizes)), 4) if part_sizes else None,
+        "max_partition_edges": max(part_sizes) if part_sizes else None,
+        "min_partition_budget": min(nonzero_budgets) if nonzero_budgets else 0,
+        "max_partition_budget": max(nonzero_budgets) if nonzero_budgets else 0,
+        "total_assigned_budget": int(sum(budgets.values())),
+        "requested_budget": budget,
+        "selected_edges": len(selected_edges),
+        "partition_edge_counts": str(
+            [(part, partition_edge_counts[part]) for part in sorted(partitions)]
+        ),
+        "partition_budgets": str(
+            [(part, budgets.get(part, 0)) for part in sorted(partitions)]
+        ),
+        "partition_selected_counts": str(
+            [(part, partition_selected_counts.get(part, 0)) for part in sorted(partitions)]
+        ),
+        "wall_time_s": round(time.time() - start_time, 4),
+    }
+
+    return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, write_time, partition_time, stages
+
+
 def hmetis_mcp_pool(hg, budget, filename, nparts=8, timeout=120,
                     top_per_partition=3, min_gain_ratio=0.7,
                     max_picks_per_round=None, max_per_partition_per_round=1,
@@ -802,12 +979,14 @@ def hmetis_mcp_refine(hg, budget, filename, nparts=8, timeout=120,
                       overlap_penalty=0.0, refine_nparts=None,
                       refine_top_per_partition=6, refine_rounds=5,
                       max_swaps_per_round=None, min_swap_gain=1e-9,
-                      refine_use_uncovered_only=False, verbose=True,
+                      refine_use_uncovered_only=False, use_greedy_seed=True,
+                      verbose=True,
                       **kwargs):
     """
-    Seed with the hMETIS candidate-pool heuristic, then use hMETIS again to
-    propose replacement candidates. A swap is accepted only when it increases
-    actual MCP coverage, so refinement cannot reduce solution quality.
+    Seed with the better of the hMETIS candidate-pool solution and Greedy, then
+    use hMETIS again to propose replacement candidates. A swap is accepted only
+    when it increases actual MCP coverage, so refinement cannot reduce solution
+    quality or fall below Greedy when use_greedy_seed is enabled.
     """
     start_time = time.time()
 
@@ -829,6 +1008,17 @@ def hmetis_mcp_refine(hg, budget, filename, nparts=8, timeout=120,
     write_time = seed[3] or 0.0
     partition_time = seed[4] or 0.0
     stages = seed[5]
+
+    if use_greedy_seed:
+        greedy_seed = pure_greedy_mcp(hg, budget=budget, filename=filename)
+        greedy_edges = set(greedy_seed[2])
+        greedy_covered = set(greedy_seed[1])
+        current_value = sum(hg.vtx_weights[vtx] for vtx in covered_vertices)
+        greedy_value = sum(hg.vtx_weights[vtx] for vtx in greedy_covered)
+        if greedy_value > current_value:
+            selected_edges = greedy_edges
+            covered_vertices = greedy_covered
+            stages = greedy_seed[5]
 
     if len(covered_vertices) >= hg.nvtxs:
         return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, write_time, partition_time, stages
@@ -905,6 +1095,158 @@ def hmetis_mcp_refine(hg, budget, filename, nparts=8, timeout=120,
         print(f"[refine] done, swaps={total_swaps}, covered={len(covered_vertices)}, "
               f"selected={len(selected_edges)}, time={final_time:.4f}s")
 
+    return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, write_time, partition_time, stages
+
+
+def hmetis_single_partition_refine(hg, budget, filename, nparts=8, timeout=120,
+                                   top_per_partition=6, min_gain_ratio=0.0,
+                                   overlap_penalty=0.0,
+                                   refine_top_per_partition=6,
+                                   refine_rounds=5,
+                                   max_swaps_per_round=None,
+                                   min_swap_gain=1e-9,
+                                   use_greedy_seed=False,
+                                   verbose=True,
+                                   **kwargs):
+    """
+    Partition once with hMETIS, then reuse those fixed partitions for both
+    construction and swap refinement.
+
+    The intent is to test whether hMETIS has value as a one-time structural
+    preprocessor, avoiding the repeated external partitioning overhead of
+    hmetis_mcp_refine.
+    """
+    start_time = time.time()
+    write_time = 0.0
+    partition_time = 0.0
+
+    partitions, parse_time, p_time = _hmetis_fixed_partitions(
+        hg, filename, nparts, timeout
+    )
+    partition_time += p_time
+    write_time += parse_time
+
+    if not partitions:
+        return pure_greedy_mcp(hg, budget=budget, filename=filename)
+
+    selected_edges = set()
+    covered_vertices = set()
+    scores = _build_scores(hg, covered_vertices, selected_edges)
+    tracker = _StageTrackerMCP(budget, start_time)
+
+    candidate_parts = {}
+    global_best_edge, global_best_score = _global_best_edge(hg, selected_edges, scores)
+    threshold = min_gain_ratio * global_best_score if global_best_edge is not None else 0.0
+    for part, part_edges in partitions.items():
+        top_edges = _top_partition_candidates(
+            hg, part_edges, selected_edges, covered_vertices, scores,
+            top_per_partition, overlap_penalty
+        )
+        for edge in top_edges:
+            if scores[edge] >= threshold:
+                candidate_parts[edge] = part
+
+    while candidate_parts and len(selected_edges) < budget:
+        best_edge = None
+        best_value = -np.inf
+
+        for edge in list(candidate_parts):
+            if edge in selected_edges or scores[edge] <= 0:
+                candidate_parts.pop(edge, None)
+                continue
+            value = _selection_value(hg, edge, covered_vertices, scores, overlap_penalty)
+            if value > best_value:
+                best_edge = edge
+                best_value = value
+
+        if best_edge is None:
+            break
+
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        if newly_covered:
+            covered_vertices.update(newly_covered)
+            selected_edges.add(best_edge)
+            scores[best_edge] = -1.0
+            _update_scores(hg, scores, newly_covered, selected_edges)
+            tracker.check(selected_edges, covered_vertices)
+        candidate_parts.pop(best_edge, None)
+
+    while len(selected_edges) < budget:
+        best_edge, best_score = _global_best_edge(hg, selected_edges, scores)
+        if best_edge is None or best_score <= 0:
+            break
+        newly_covered = hg.hedges_dict[best_edge] - covered_vertices
+        if not newly_covered:
+            break
+        covered_vertices.update(newly_covered)
+        selected_edges.add(best_edge)
+        scores[best_edge] = -1.0
+        _update_scores(hg, scores, newly_covered, selected_edges)
+        tracker.check(selected_edges, covered_vertices)
+
+    if use_greedy_seed:
+        greedy_seed = pure_greedy_mcp(hg, budget=budget, filename=filename)
+        greedy_edges = set(greedy_seed[2])
+        greedy_covered = set(greedy_seed[1])
+        current_value = sum(hg.vtx_weights[vtx] for vtx in covered_vertices)
+        greedy_value = sum(hg.vtx_weights[vtx] for vtx in greedy_covered)
+        if greedy_value > current_value:
+            selected_edges = greedy_edges
+            covered_vertices = greedy_covered
+
+    for round_idx in range(refine_rounds):
+        cover_counts = _solution_cover_counts(hg, selected_edges)
+        scores = _build_scores(hg, set(cover_counts), selected_edges)
+        candidates = set()
+        for part_edges in partitions.values():
+            candidates.update(
+                _top_partition_candidates(
+                    hg, part_edges, selected_edges, set(cover_counts),
+                    scores, refine_top_per_partition, overlap_penalty
+                )
+            )
+
+        candidates = [edge for edge in candidates if edge not in selected_edges]
+        if not candidates:
+            break
+
+        swaps_this_round = 0
+        improved = True
+        while improved and candidates:
+            if max_swaps_per_round is not None and swaps_this_round >= max_swaps_per_round:
+                break
+
+            improved = False
+            cover_counts = _solution_cover_counts(hg, selected_edges)
+            best_in = None
+            best_out = None
+            best_gain = min_swap_gain
+
+            for in_edge in candidates:
+                if in_edge in selected_edges:
+                    continue
+                for out_edge in selected_edges:
+                    gain = _replacement_gain(hg, cover_counts, in_edge, out_edge)
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_in = in_edge
+                        best_out = out_edge
+
+            if best_in is not None:
+                selected_edges.remove(best_out)
+                selected_edges.add(best_in)
+                candidates.remove(best_in)
+                covered_vertices = set(_solution_cover_counts(hg, selected_edges))
+                swaps_this_round += 1
+                improved = True
+
+        if verbose:
+            print(f"[single-refine] round={round_idx + 1}, swaps={swaps_this_round}, "
+                  f"covered={len(covered_vertices)}")
+
+    final_time = round(time.time() - start_time, 4)
+    final_coverage = len(covered_vertices)
+    stages = tracker.result(len(selected_edges), final_coverage, final_time)
     return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, write_time, partition_time, stages
 
 

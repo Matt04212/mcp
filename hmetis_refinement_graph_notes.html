@@ -1,0 +1,461 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2487.5">
+  <style type="text/css">
+    p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px 'Helvetica Light'}
+    p.p2 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px 'Helvetica Light'; min-height: 14.0px}
+  </style>
+</head>
+<body>
+<p class="p1"># hMETIS-Refinement and Natural Hierarchical Graph Notes</p>
+<p class="p2"><br></p>
+<p class="p1">## 1. Main Research Story</p>
+<p class="p2"><br></p>
+<p class="p1">The current project direction is:</p>
+<p class="p2"><br></p>
+<p class="p1">&gt; Use hMETIS as a structure-aware refinement tool for the Maximum Coverage Problem</p>
+<p class="p1">&gt; on hierarchical community-structured hypergraphs.</p>
+<p class="p2"><br></p>
+<p class="p1">The claim is not that hMETIS universally beats greedy. The more accurate claim is:</p>
+<p class="p2"><br></p>
+<p class="p1">&gt; On graphs with community and subcommunity overlap structure, hMETIS-refinement</p>
+<p class="p1">&gt; can improve greedy by finding structurally diverse replacement candidates.</p>
+<p class="p1">&gt; Tabu search still gives the best final quality, but hMETIS-refinement captures</p>
+<p class="p1">&gt; part of tabu's improvement with lower runtime.</p>
+<p class="p2"><br></p>
+<p class="p1">## 2. Natural Hierarchical Graph</p>
+<p class="p2"><br></p>
+<p class="p1">The graph is generated in `experiment_natural_hierarchy.py`.</p>
+<p class="p2"><br></p>
+<p class="p1">The vertices are grouped into hidden communities and subcommunities:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">community</p>
+<p class="p1"><span class="Apple-converted-space">  </span>subcommunity</p>
+<p class="p1"><span class="Apple-converted-space">    </span>vertices</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">For example, in the large setting:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">nvtxs = 4800</p>
+<p class="p1">n_communities = 12</p>
+<p class="p1">subcommunities_per_community = 5</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">This means:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">12 communities</p>
+<p class="p1">5 subcommunities in each community</p>
+<p class="p1">60 total subcommunities</p>
+<p class="p1">about 400 vertices per community</p>
+<p class="p1">about 80 vertices per subcommunity</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Communities and subcommunities are hidden generation labels. They are not</p>
+<p class="p1">selectable edges and they do not directly cover anything.</p>
+<p class="p2"><br></p>
+<p class="p1">## 3. What Communities Are Used For</p>
+<p class="p2"><br></p>
+<p class="p1">Communities and subcommunities are only sampling pools.</p>
+<p class="p2"><br></p>
+<p class="p1">They tell the generator where an edge should sample vertices from.</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">community/subcommunity = hidden source pool</p>
+<p class="p1">generated hedge/edge = actual selectable coverage set</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Example:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">Subcommunity A = {1, 2, 3, ..., 80}</p>
+<p class="p1">Generated local edge = {3, 7, 11, 14, ..., 72}</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">The algorithm can select the generated local edge. It cannot select the</p>
+<p class="p1">subcommunity itself.</p>
+<p class="p2"><br></p>
+<p class="p1">## 4. Edge Types</p>
+<p class="p2"><br></p>
+<p class="p1">The generator creates four edge types.</p>
+<p class="p2"><br></p>
+<p class="p1">### Global Generalist Edges</p>
+<p class="p2"><br></p>
+<p class="p1">Global edges sample a small number of vertices from many communities.</p>
+<p class="p2"><br></p>
+<p class="p1">They represent broad actions such as:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">large campaign</p>
+<p class="p1">wide-area service</p>
+<p class="p1">general recommendation</p>
+<p class="p1">broad sensor/facility</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Global does not necessarily mean largest. It means the edge is diverse across</p>
+<p class="p1">communities.</p>
+<p class="p2"><br></p>
+<p class="p1">Sampling behavior:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">choose about 65% to 100% of all communities</p>
+<p class="p1">from each chosen community:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>sample about 7% of popular vertices</p>
+<p class="p1"><span class="Apple-converted-space">    </span>sample about 1.2% of tail vertices</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### Community Edges</p>
+<p class="p2"><br></p>
+<p class="p1">Community edges focus on one community, but sample across several</p>
+<p class="p1">subcommunities inside it.</p>
+<p class="p2"><br></p>
+<p class="p1">Sampling behavior:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">choose 1 community</p>
+<p class="p1">choose 2 to all subcommunities inside that community</p>
+<p class="p1">from each chosen subcommunity:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>sample about 18% to 35%</p>
+<p class="p1">also sample about 3% of popular vertices from that community</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### Local Specialist Edges</p>
+<p class="p2"><br></p>
+<p class="p1">Local edges focus deeply on one subcommunity.</p>
+<p class="p2"><br></p>
+<p class="p1">Sampling behavior:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">choose 1 community</p>
+<p class="p1">choose 1 subcommunity</p>
+<p class="p1">sample about 45% to 78% of that subcommunity</p>
+<p class="p1">with 25% probability:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>also sample about 6% of a neighboring subcommunity</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### Bridge/Noise Edges</p>
+<p class="p2"><br></p>
+<p class="p1">Bridge edges connect two communities with small sampled pieces.</p>
+<p class="p2"><br></p>
+<p class="p1">Sampling behavior:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">choose 2 different communities</p>
+<p class="p1">choose 1 subcommunity from each</p>
+<p class="p1">sample a small amount from both</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">These edges add noise and cross-community overlap.</p>
+<p class="p2"><br></p>
+<p class="p1">## 5. Edge Size Control</p>
+<p class="p2"><br></p>
+<p class="p1">The generator controls edge size by sampling rules and a shared maximum cap.</p>
+<p class="p2"><br></p>
+<p class="p1">The cap is:</p>
+<p class="p2"><br></p>
+<p class="p1">```python</p>
+<p class="p1">max_edge_size = max(60, min(220, int(0.055 * nvtxs)))</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">So approximately:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">small:<span class="Apple-converted-space">  </span>nvtxs = 1200 -&gt; max edge size about 66</p>
+<p class="p1">medium: nvtxs = 2400 -&gt; max edge size about 132</p>
+<p class="p1">large:<span class="Apple-converted-space">  </span>nvtxs = 4800 -&gt; max edge size about 220</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">No edge type is guaranteed to be larger than another.</p>
+<p class="p2"><br></p>
+<p class="p1">The edge type controls coverage pattern:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">global<span class="Apple-converted-space">    </span>= wide and shallow</p>
+<p class="p1">community = medium-scale within one community</p>
+<p class="p1">local <span class="Apple-converted-space">    </span>= narrow and deep</p>
+<p class="p1">bridge<span class="Apple-converted-space">    </span>= small cross-community</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">All edge types are clipped if they exceed `max_edge_size`.</p>
+<p class="p2"><br></p>
+<p class="p1">## 6. Stochasticity</p>
+<p class="p2"><br></p>
+<p class="p1">The graph is stochastic because every run randomly changes:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">which communities a global edge touches</p>
+<p class="p1">which vertices are sampled</p>
+<p class="p1">which community a community edge chooses</p>
+<p class="p1">which subcommunities a community edge touches</p>
+<p class="p1">how deep each local edge is</p>
+<p class="p1">whether a local edge touches a neighbor</p>
+<p class="p1">which two communities a bridge edge connects</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">So every instance has the same broad structure, but not the same exact edges.</p>
+<p class="p2"><br></p>
+<p class="p1">This is more natural than the tailored bait graph because there is no exact</p>
+<p class="p1">known optimum and no hand-coded winning solution.</p>
+<p class="p2"><br></p>
+<p class="p1">## 7. Why Greedy Can Struggle</p>
+<p class="p2"><br></p>
+<p class="p1">Greedy repeatedly picks the edge with the largest current uncovered gain.</p>
+<p class="p2"><br></p>
+<p class="p1">On this graph, greedy can over-select:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">broad global edges</p>
+<p class="p1">community edges that cover popular/common regions</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">These choices look good early, but they can overlap later. Greedy cannot undo</p>
+<p class="p1">earlier decisions.</p>
+<p class="p2"><br></p>
+<p class="p1">The result is usually not a huge failure, because greedy is strong. But it can</p>
+<p class="p1">leave modest improvement opportunities.</p>
+<p class="p2"><br></p>
+<p class="p1">## 8. Why hMETIS Helps</p>
+<p class="p2"><br></p>
+<p class="p1">hMETIS partitions vertices, but MCP selects edges. To use hMETIS, the graph is</p>
+<p class="p1">written in reverse:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">hMETIS vertex = original MCP edge/set</p>
+<p class="p1">hMETIS hyperedge = original MCP vertex/element</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">If two MCP edges cover many of the same vertices, they appear together in many</p>
+<p class="p1">hMETIS hyperedges. That makes them structurally connected.</p>
+<p class="p2"><br></p>
+<p class="p1">In the natural hierarchy graph:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">local edges from the same subcommunity overlap</p>
+<p class="p1">community edges inside the same community overlap</p>
+<p class="p1">global edges overlap on popular vertices</p>
+<p class="p1">bridge edges connect communities</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">hMETIS can detect this structure indirectly through overlap. It is not given</p>
+<p class="p1">community labels.</p>
+<p class="p2"><br></p>
+<p class="p1">## 9. hMETIS-Refinement Algorithm</p>
+<p class="p2"><br></p>
+<p class="p1">hMETIS-refinement uses hMETIS as a candidate generator, not as the final solver.</p>
+<p class="p2"><br></p>
+<p class="p1">It has two phases.</p>
+<p class="p2"><br></p>
+<p class="p1">### Phase 1: hMETIS Candidate-Pool Construction</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">start with empty selected set</p>
+<p class="p1">while budget is not full:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>write current residual hypergraph to hMETIS</p>
+<p class="p1"><span class="Apple-converted-space">    </span>partition remaining candidate edges</p>
+<p class="p1"><span class="Apple-converted-space">    </span>take top candidates from each partition</p>
+<p class="p1"><span class="Apple-converted-space">    </span>choose globally using current marginal coverage gain</p>
+<p class="p1"><span class="Apple-converted-space">    </span>update selected edges and covered vertices</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">This is not simply "pick one edge from every partition." The partition only</p>
+<p class="p1">creates a diversified candidate pool. Marginal coverage still decides selection.</p>
+<p class="p2"><br></p>
+<p class="p1">### Phase 2: hMETIS-Guided Swap Refinement</p>
+<p class="p2"><br></p>
+<p class="p1">After the initial solution is full:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">repeat for several rounds:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>run hMETIS again</p>
+<p class="p1"><span class="Apple-converted-space">    </span>collect replacement candidates from partitions</p>
+<p class="p1"><span class="Apple-converted-space">    </span>for each candidate edge not currently selected:</p>
+<p class="p1"><span class="Apple-converted-space">        </span>for each selected edge:</p>
+<p class="p1"><span class="Apple-converted-space">            </span>compute exact coverage change if swapped</p>
+<p class="p1"><span class="Apple-converted-space">    </span>accept the best positive-gain swap</p>
+<p class="p1"><span class="Apple-converted-space">    </span>stop when no positive-gain swap exists</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">The most important rule:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">accept a swap only if actual MCP coverage improves</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">So hMETIS proposes candidates, but the MCP objective makes the final decision.</p>
+<p class="p2"><br></p>
+<p class="p1">## 10. Why Refinement Is More Reliable Than Direct hMETIS Selection</p>
+<p class="p2"><br></p>
+<p class="p1">The original direct hMETIS method tries to use partitions too directly.</p>
+<p class="p2"><br></p>
+<p class="p1">That can fail because:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">hMETIS minimizes cuts; MCP maximizes covered vertices</p>
+<p class="p1">partition-local choice may ignore global marginal gain</p>
+<p class="p1">early mistakes cannot be repaired</p>
+<p class="p1">one-per-partition constraints can reject good choices</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">hMETIS-refinement is safer:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">hMETIS only proposes candidates</p>
+<p class="p1">coverage gain accepts or rejects each swap</p>
+<p class="p1">bad hMETIS suggestions are ignored</p>
+<p class="p1">earlier selected edges can be replaced</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">## 11. Difference From Tabu</p>
+<p class="p2"><br></p>
+<p class="p1">Tabu is a broader local search:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">starts from greedy</p>
+<p class="p1">tries many possible swaps</p>
+<p class="p1">can accept non-improving moves</p>
+<p class="p1">uses memory to avoid cycling</p>
+<p class="p1">keeps the best solution found</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">hMETIS-refinement is narrower:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">starts from hMETIS candidate-pool solution</p>
+<p class="p1">uses hMETIS partitions to propose replacement candidates</p>
+<p class="p1">accepts only improving swaps</p>
+<p class="p1">does not accept worse moves</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Therefore tabu usually has better final quality, but hMETIS-refinement is faster</p>
+<p class="p1">and more directly tied to the hypergraph partitioning idea.</p>
+<p class="p2"><br></p>
+<p class="p1">## 12. hMETIS Parameters</p>
+<p class="p2"><br></p>
+<p class="p1">The main hMETIS-refinement configuration is:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">nparts = 16</p>
+<p class="p1">top_per_partition = 4</p>
+<p class="p1">min_gain_ratio = 0.70</p>
+<p class="p1">refine_top_per_partition = 10</p>
+<p class="p1">refine_rounds = 5</p>
+<p class="p1">timeout = 45 seconds</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### nparts = 16</p>
+<p class="p2"><br></p>
+<p class="p1">This means hMETIS partitions the candidate edge-space into 16 parts.</p>
+<p class="p2"><br></p>
+<p class="p1">Why 16?</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">small enough to keep runtime manageable</p>
+<p class="p1">large enough to expose multiple communities/subcommunities</p>
+<p class="p1">stable across small, medium, and large tests</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Using too few partitions gives weak diversity. Using too many partitions</p>
+<p class="p1">increases runtime and may make partitions too small/noisy.</p>
+<p class="p2"><br></p>
+<p class="p1">For larger future tests, `nparts = 32` is worth trying, but for the current</p>
+<p class="p1">focused comparison `p16` is the clean default.</p>
+<p class="p2"><br></p>
+<p class="p1">### top_per_partition = 4</p>
+<p class="p2"><br></p>
+<p class="p1">During construction, each partition contributes up to 4 candidate edges.</p>
+<p class="p2"><br></p>
+<p class="p1">Why 4?</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">1 candidate per partition is too restrictive</p>
+<p class="p1">too many candidates makes hMETIS guidance less meaningful</p>
+<p class="p1">4 keeps a small but flexible candidate pool</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### min_gain_ratio = 0.70</p>
+<p class="p2"><br></p>
+<p class="p1">A candidate must have at least 70% of the current global best marginal gain to</p>
+<p class="p1">be considered during construction.</p>
+<p class="p2"><br></p>
+<p class="p1">Why?</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">prevents selecting very weak edges just for diversity</p>
+<p class="p1">still allows hMETIS to choose slightly less greedy but more diverse edges</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### refine_top_per_partition = 10</p>
+<p class="p2"><br></p>
+<p class="p1">During refinement, each partition can contribute up to 10 replacement candidates.</p>
+<p class="p2"><br></p>
+<p class="p1">Why more than construction?</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">refinement needs a broader pool to find useful swaps</p>
+<p class="p1">bad candidates are safe because swaps must improve actual coverage</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### refine_rounds = 5</p>
+<p class="p2"><br></p>
+<p class="p1">The algorithm repeats hMETIS-guided swap search for up to 5 rounds.</p>
+<p class="p2"><br></p>
+<p class="p1">Why 5?</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">enough to find multiple improvements</p>
+<p class="p1">avoids very long runtimes</p>
+<p class="p1">usually stops early if no improving swaps exist</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">### timeout = 45 seconds</p>
+<p class="p2"><br></p>
+<p class="p1">Each hMETIS call has a timeout to avoid hanging on larger instances.</p>
+<p class="p2"><br></p>
+<p class="p1">## 13. Current Comparison Result</p>
+<p class="p2"><br></p>
+<p class="p1">On the natural hierarchy graph:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">small:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>greedy avg = 877.33</p>
+<p class="p1"><span class="Apple-converted-space">    </span>hMETIS-refine avg = 880.67</p>
+<p class="p1"><span class="Apple-converted-space">    </span>tabu avg = 883.33</p>
+<p class="p2"><br></p>
+<p class="p1">medium:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>greedy avg = 2009.67</p>
+<p class="p1"><span class="Apple-converted-space">    </span>hMETIS-refine avg = 2022.00</p>
+<p class="p1"><span class="Apple-converted-space">    </span>tabu avg = 2028.00</p>
+<p class="p2"><br></p>
+<p class="p1">large:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>greedy avg = 4465.33</p>
+<p class="p1"><span class="Apple-converted-space">    </span>hMETIS-refine avg = 4497.67</p>
+<p class="p1"><span class="Apple-converted-space">    </span>tabu avg = 4511.00</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">Runtime:</p>
+<p class="p2"><br></p>
+<p class="p1">```text</p>
+<p class="p1">large:</p>
+<p class="p1"><span class="Apple-converted-space">    </span>greedy avg = 0.62s</p>
+<p class="p1"><span class="Apple-converted-space">    </span>hMETIS-refine avg = 44.60s</p>
+<p class="p1"><span class="Apple-converted-space">    </span>tabu avg = 165.77s</p>
+<p class="p1">```</p>
+<p class="p2"><br></p>
+<p class="p1">## 14. Best Final Claim</p>
+<p class="p2"><br></p>
+<p class="p1">The most defensible claim is:</p>
+<p class="p2"><br></p>
+<p class="p1">&gt; Tabu gives the best final solution quality. However, hMETIS-refinement gives a</p>
+<p class="p1">&gt; faster structure-aware improvement over greedy. On larger hierarchical</p>
+<p class="p1">&gt; community graphs, it captures a substantial portion of tabu's improvement</p>
+<p class="p1">&gt; while using less runtime.</p>
+<p class="p2"><br></p>
+</body>
+</html>

@@ -1,7 +1,6 @@
 import time
 import numpy as np
 from hypergraph import Hypergraph
-from optimal import optimal_solu
 
 
 # ─────────────────────────────────────────────
@@ -65,6 +64,16 @@ def _safe_mean(runs, key):
 def _safe_std(runs, key):
     vals = [r[key] for r in runs if r.get(key) is not None]
     return round(np.std(vals), 4) if vals else None
+
+
+def _edge_size_meta(hg):
+    sizes = [len(hg.hedges_dict[e]) for e in hg.hedges]
+    return {
+        'min_edge_size': min(sizes),
+        'mean_edge_size': round(float(np.mean(sizes)), 4),
+        'median_edge_size': round(float(np.median(sizes)), 4),
+        'max_edge_size': max(sizes),
+    }
 
 
 def _average_metrics(runs, nhedges, nvtxs, dist, algo_name, n_runs):
@@ -235,7 +244,137 @@ def evaluate_mcp(algos, filename, size, distributions, n_runs, budget_ratio, **k
     return all_results
 
 
+def evaluate_parallel_mcp(
+    filename,
+    size,
+    distributions,
+    n_runs,
+    budget_ratio,
+    whole_algo,
+    partition_algo,
+    nparts_list,
+    seed_base=1000,
+    budget_mode='equal',
+    timeout=120,
+    return_details=False,
+    **kwargs,
+):
+    """
+    Compare whole-graph greedy against one-shot partition-then-local-greedy.
+
+    The graph family comes directly from Hypergraph.generate(...), so
+    distributions should use names such as:
+      beta_right, beta_left, beta_bell, uniform
+    """
+    summary_rows = []
+    detail_rows = []
+
+    for nhedges, nvtxs in size:
+        budget = max(1, int(round(budget_ratio * nhedges)))
+
+        for dist_idx, dist in enumerate(distributions):
+            by_nparts = {nparts: [] for nparts in nparts_list}
+
+            for run in range(1, n_runs + 1):
+                seed = seed_base + 1_000_000 * dist_idx + 10_000 * run + 10 * nhedges + nvtxs
+                np.random.seed(seed)
+                hg = Hypergraph(nhedges, nvtxs)
+                hg.generate(distribution=dist)
+
+                graph_meta = _edge_size_meta(hg)
+                whole_metrics = run_single(hg, whole_algo, filename, budget=budget, **kwargs)
+                whole_weighted = round(
+                    sum(hg.vtx_weights[v] for v in whole_metrics['covered_vertices']), 6
+                )
+
+                for nparts in nparts_list:
+                    partition_metrics = run_single(
+                        hg,
+                        partition_algo,
+                        filename,
+                        budget=budget,
+                        nparts=nparts,
+                        timeout=timeout,
+                        budget_mode=budget_mode,
+                        **kwargs,
+                    )
+                    partition_weighted = round(
+                        sum(hg.vtx_weights[v] for v in partition_metrics['covered_vertices']), 6
+                    )
+
+                    row = {
+                        'size': (nhedges, nvtxs),
+                        'distribution': dist,
+                        'run': run,
+                        'seed': seed,
+                        'budget': budget,
+                        'budget_ratio': budget_ratio,
+                        'nparts': nparts,
+                        'budget_mode': budget_mode,
+                        'whole_coverage': len(whole_metrics['covered_vertices']),
+                        'whole_weighted_coverage': whole_weighted,
+                        'whole_time(s)': whole_metrics['time(s)'],
+                        'whole_overlap_ratio': whole_metrics['overlap_ratio'],
+                        'partition_coverage': len(partition_metrics['covered_vertices']),
+                        'partition_weighted_coverage': partition_weighted,
+                        'partition_time(s)': partition_metrics['time(s)'],
+                        'partition_write_time(s)': partition_metrics['write_time(s)'],
+                        'partition_partition_time(s)': partition_metrics['partition_time(s)'],
+                        'partition_overlap_ratio': partition_metrics['overlap_ratio'],
+                        'quality_ratio': round(partition_weighted / whole_weighted, 6)
+                        if whole_weighted > 0 else None,
+                        'quality_gap': round(whole_weighted - partition_weighted, 6),
+                        'quality_loss_pct': round(
+                            100.0 * (whole_weighted - partition_weighted) / whole_weighted, 4
+                        ) if whole_weighted > 0 else None,
+                        'partition_minus_whole': round(partition_weighted - whole_weighted, 6),
+                        **graph_meta,
+                    }
+
+                    by_nparts[nparts].append(row)
+                    detail_rows.append(row)
+
+                print(f"  [{dist} {nhedges},{nvtxs}] run {run}/{n_runs} done")
+
+            for nparts in nparts_list:
+                runs = by_nparts[nparts]
+                summary_rows.append({
+                    'size': (nhedges, nvtxs),
+                    'distribution': dist,
+                    'nparts': nparts,
+                    'budget': budget,
+                    'budget_ratio': budget_ratio,
+                    'budget_mode': budget_mode,
+                    'runs': len(runs),
+                    'whole_weighted_coverage': _safe_mean(runs, 'whole_weighted_coverage'),
+                    'partition_weighted_coverage': _safe_mean(runs, 'partition_weighted_coverage'),
+                    'quality_ratio': _safe_mean(runs, 'quality_ratio'),
+                    'std_quality_ratio': _safe_std(runs, 'quality_ratio'),
+                    'quality_gap': _safe_mean(runs, 'quality_gap'),
+                    'quality_loss_pct': _safe_mean(runs, 'quality_loss_pct'),
+                    'whole_time(s)': _safe_mean(runs, 'whole_time(s)'),
+                    'partition_time(s)': _safe_mean(runs, 'partition_time(s)'),
+                    'partition_write_time(s)': _safe_mean(runs, 'partition_write_time(s)'),
+                    'partition_partition_time(s)': _safe_mean(runs, 'partition_partition_time(s)'),
+                    'whole_overlap_ratio': _safe_mean(runs, 'whole_overlap_ratio'),
+                    'partition_overlap_ratio': _safe_mean(runs, 'partition_overlap_ratio'),
+                    'min_edge_size': _safe_mean(runs, 'min_edge_size'),
+                    'mean_edge_size': _safe_mean(runs, 'mean_edge_size'),
+                    'median_edge_size': _safe_mean(runs, 'median_edge_size'),
+                    'max_edge_size': _safe_mean(runs, 'max_edge_size'),
+                    'partition_wins': int(sum(r['partition_minus_whole'] > 0 for r in runs)),
+                    'ties': int(sum(r['partition_minus_whole'] == 0 for r in runs)),
+                    'partition_losses': int(sum(r['partition_minus_whole'] < 0 for r in runs)),
+                })
+
+    if return_details:
+        return summary_rows, detail_rows
+    return summary_rows
+
+
 def evaluate_optimal(algos, filename, size, distributions, n_runs, budget_ratio, **kwargs):
+    from optimal import optimal_solu
+
     all_results = []
     for nhedges, nvtxs in size:
         budget = int(budget_ratio * nhedges)

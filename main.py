@@ -44,9 +44,9 @@ Change the CONFIG below to run larger/smaller experiments.
 
 
 CONFIG = {
-    # dis2_uniform is unweighted. dis2_weighted uses vertex weights 1..10,
-    # matching the weighted option from the paper.
-    "graph_types": ["dis2_unweighted", "natural_hierarchy"],
+    # Default graph list. Individual scenarios can override this with their
+    # own "graph_types" field.
+    "graph_types": ["dis2_weighted"],
     "results_file": "mcp_two_graph_compare_results.csv",
     "summary_file": "mcp_two_graph_compare_summary.csv",
     "hmetis_file": "mcp_two_graph_compare.hgr",
@@ -61,12 +61,17 @@ CONFIG = {
 
 
 SCENARIOS = [
-    {"name": "scale_500_F0.5_B0.1", "nvtxs": 500, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    {"name": "scale_1000_F0.5_B0.1", "nvtxs": 1000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    {"name": "scale_2000_F0.5_B0.1", "nvtxs": 2000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    {"name": "scale_5000_F0.5_B0.1", "nvtxs": 5000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
-    {"name": "scale_10000_F0.5_B0.1", "nvtxs": 10000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16, "skip_algorithms": ["pure_tabu"]},
-    {"name": "scale_15000_F0.5_B0.1", "nvtxs": 15000, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16, "skip_algorithms": ["pure_tabu"]},
+    # Paper-style dis2 instances. LP is enabled so performance and fraction
+    # optimal are computed like the paper.
+    {"name": "paper_dis2_100_F0.5_B0.1", "graph_types": ["dis2_weighted"], "nvtxs": 100, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 16},
+    {"name": "paper_dis2_150_F0.5_B0.1", "graph_types": ["dis2_weighted"], "nvtxs": 150, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 16},
+    {"name": "paper_dis2_200_F0.5_B0.1", "graph_types": ["dis2_weighted"], "nvtxs": 200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": True, "nparts": 16},
+
+    # Structured hierarchy instances. These are the main cases for evaluating
+    # whether hMETIS-refine captures a meaningful fraction of Tabu's gain with
+    # less runtime.
+    {"name": "hier_1200_F0.5_B0.1", "graph_types": ["natural_hierarchy"], "nvtxs": 1200, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
+    {"name": "hier_2400_F0.5_B0.1", "graph_types": ["natural_hierarchy"], "nvtxs": 2400, "f_ratio": 0.5, "budget_ratio": 0.1, "runs": 10, "solve_lp": False, "nparts": 16},
 ]
 
 
@@ -99,18 +104,12 @@ ALGORITHMS = {
     "hmetis_refine": {
         "kind": "refine",
         "nparts": "scenario",
-        "top_per_partition": 5,
-        "min_gain_ratio": 0.55,
-        "refine_top_per_partition": 14,
+        "top_per_partition": 10,
+        "min_gain_ratio": 0.0,
+        "refine_top_per_partition": 10,
         "refine_rounds": 5,
-        "max_swaps_per_round": 10,
-    },
-    "pure_oblswap": {
-        "kind": "oblswap",
-        "max_iter": 200,
-        # Full OblSwap becomes very expensive for the 10k/15k cases. This keeps
-        # the comparison practical while preserving the one-swap logic.
-        "candidate_pool_size": 400,
+        "max_swaps_per_round": None,
+        "use_greedy_seed": False,
     },
     "pure_tabu": {
         "kind": "tabu",
@@ -128,10 +127,9 @@ ALGORITHMS = {
 
 ALGO_ORDER = {
     "pure_greedy": 1,
-    "original_hmetis": 2,
-    "hmetis_refine": 3,
-    "pure_oblswap": 4,
-    "pure_tabu": 5,
+    "pure_tabu": 2,
+    "original_hmetis": 3,
+    "hmetis_refine": 4,
 }
 
 
@@ -234,7 +232,7 @@ def iter_scenarios():
         budget_ratio = size_cfg["budget_ratio"]
         nhedges = max(1, int(f_ratio * nvtxs))
         budget = max(1, int(budget_ratio * nhedges))
-        for graph_type in CONFIG["graph_types"]:
+        for graph_type in size_cfg.get("graph_types", CONFIG["graph_types"]):
             for run in range(1, size_cfg.get("runs", 1) + 1):
                 seed = 200_000 + 10_000 * run + 1_000 * scenario_idx + nvtxs
                 scenario = {
@@ -439,5 +437,5 @@ def main():
     print(f"Saved averaged summary to {CONFIG['summary_file']}")
 
 
-if __name__ == "__main__":
-    main()
+#if __name__ == "__main__":
+#    main()

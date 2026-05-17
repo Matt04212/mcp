@@ -11,6 +11,8 @@ def edge_size_meta(hg):
     return {
         "min_edge_size": min(sizes),
         "mean_edge_size": round(sum(sizes) / len(sizes), 2),
+        "median_edge_size": round(float(np.median(sizes)), 2),
+        "std_edge_size": round(float(np.std(sizes)), 2),
         "max_edge_size": max(sizes),
         "min_vertex_weight": min(weights),
         "mean_vertex_weight": round(sum(weights) / len(weights), 2),
@@ -54,6 +56,105 @@ def build_dis2_graph(nhedges, nvtxs, seed, rmax=0.035, weight_mode="uniform"):
         "graph_family": "dis2",
         "weight_mode": weight_mode,
         "rmax": rmax,
+        **edge_size_meta(hg),
+    }
+
+
+BETA_EDGE_SIZE_SHAPES = {
+    "beta_right_skew": {
+        "alpha": 1.0,
+        "beta": 5.0,
+        "description": "right_skew_many_small_few_large",
+    },
+    "beta_left_skew": {
+        "alpha": 5.0,
+        "beta": 1.0,
+        "description": "left_skew_many_large_few_small",
+    },
+    "beta_bell": {
+        "alpha": 5.0,
+        "beta": 5.0,
+        "description": "bell_shaped_middle_sizes",
+    },
+    "beta_uniform": {
+        "alpha": 1.0,
+        "beta": 1.0,
+        "description": "uniform_edge_sizes",
+    },
+}
+
+
+def build_beta_edge_size_graph(
+    nhedges,
+    nvtxs,
+    seed,
+    edge_shape="beta_right_skew",
+    min_edge_size=1,
+    max_edge_size=None,
+    max_edge_ratio=0.12,
+    weight_mode="uniform",
+):
+    """
+    Random MCP hypergraph where the beta draw controls edge cardinality.
+
+    right_skew uses Beta(1, 5), so most edges are small and a few are large.
+    left_skew uses Beta(5, 1), so most edges are large and a few are small.
+    """
+    if edge_shape not in BETA_EDGE_SIZE_SHAPES:
+        known = ", ".join(sorted(BETA_EDGE_SIZE_SHAPES))
+        raise ValueError(f"unknown edge_shape: {edge_shape}; expected one of {known}")
+
+    rng = np.random.default_rng(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if max_edge_size is None:
+        max_edge_size = int(round(max_edge_ratio * nvtxs))
+    min_edge_size = max(1, min(int(min_edge_size), nvtxs))
+    max_edge_size = max(min_edge_size, min(int(max_edge_size), nvtxs))
+
+    shape = BETA_EDGE_SIZE_SHAPES[edge_shape]
+    raw = rng.beta(shape["alpha"], shape["beta"], size=nhedges)
+    edge_sizes = np.floor(
+        min_edge_size + raw * (max_edge_size - min_edge_size)
+    ).astype(int)
+    edge_sizes = np.clip(edge_sizes, min_edge_size, max_edge_size)
+
+    hg = Hypergraph(nhedges, nvtxs)
+    hg.hedges = list(range(1, nhedges + 1))
+    hg.vtxs = list(range(1, nvtxs + 1))
+    hg.nhedges = nhedges
+    hg.nvtxs = nvtxs
+    hg.hedges_dict = {}
+    hg.vtxs_dict = {v: set() for v in hg.vtxs}
+
+    vertices = np.arange(1, nvtxs + 1)
+    for edge, size in zip(hg.hedges, edge_sizes):
+        covered = set(int(v) for v in rng.choice(vertices, size=int(size), replace=False))
+        hg.hedges_dict[edge] = covered
+        for vertex in covered:
+            hg.vtxs_dict[vertex].add(edge)
+
+    # Ensure every vertex is coverable, while preserving the sampled edge-size
+    # shape as much as possible.
+    for vertex, incident in hg.vtxs_dict.items():
+        if not incident:
+            edge = int(rng.integers(1, nhedges + 1))
+            hg.hedges_dict[edge].add(vertex)
+            incident.add(edge)
+
+    _set_vertex_weights(hg, seed + 17, weight_mode)
+    return hg, {
+        "graph_family": "beta_edge_size",
+        "graph_type": edge_shape,
+        "weight_mode": weight_mode,
+        "edge_size_shape": edge_shape,
+        "edge_size_description": shape["description"],
+        "beta_alpha": shape["alpha"],
+        "beta_beta": shape["beta"],
+        "min_edge_size_target": min_edge_size,
+        "max_edge_size_target": max_edge_size,
+        "max_edge_ratio": max_edge_ratio,
         **edge_size_meta(hg),
     }
 
@@ -145,10 +246,15 @@ def build_natural_hierarchy_graph(
         community_popular.append(popular)
         community_tail.append(tail)
 
-    # Keep hierarchy edges useful but avoid saturating the whole universe when
-    # F=0.8|U|. The cap scales with |U|, but the lower bound stays modest so
-    # small/medium instances do not become automatically full-covered.
-    max_edge_size = max(20, min(max_edge_cap, int(max_edge_ratio * nvtxs)))
+    # For larger universes, keep edge growth sublinear so the graph preserves
+    # hierarchy structure without turning into near-complete coverage under a
+    # moderate budget. Up to 5000 vertices we keep the previous behavior; past
+    # that point we gradually thin the large-instance sampling density.
+    large_scale = 1.0 if nvtxs <= 5000 else min(1.0, (5000.0 / nvtxs) ** 0.55)
+    max_edge_size = max(
+        18,
+        min(max_edge_cap, int(max_edge_ratio * nvtxs * large_scale)),
+    )
     n_global = int(0.14 * nhedges)
     n_community = int(0.28 * nhedges)
     n_local = int(0.44 * nhedges)
@@ -167,8 +273,18 @@ def build_natural_hierarchy_graph(
         for community_idx in active:
             pop_pool = community_popular[community_idx]
             tail_pool = community_tail[community_idx]
-            edge.update(_sample(rng, pop_pool, max(1, int(0.045 * len(pop_pool)))))
-            edge.update(_sample(rng, tail_pool, max(1, int(0.006 * len(tail_pool)))))
+            edge.update(
+                _sample(
+                    rng, pop_pool,
+                    max(1, int(0.045 * large_scale * len(pop_pool)))
+                )
+            )
+            edge.update(
+                _sample(
+                    rng, tail_pool,
+                    max(1, int(0.006 * large_scale * len(tail_pool)))
+                )
+            )
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 
     # Community edges: medium coverage within one community.
@@ -183,14 +299,14 @@ def build_natural_hierarchy_graph(
         )
         for sub_idx in active_subs:
             sub = subs[sub_idx]
-            low = max(2, int(0.10 * len(sub)))
-            high = max(3, int(0.22 * len(sub)))
+            low = max(2, int(0.10 * large_scale * len(sub)))
+            high = max(3, int(0.22 * large_scale * len(sub)))
             edge.update(_sample(rng, sub, int(rng.integers(low, high))))
         edge.update(
             _sample(
                 rng,
                 community_popular[community_idx],
-                max(1, int(0.018 * len(community_popular[community_idx]))),
+                max(1, int(0.018 * large_scale * len(community_popular[community_idx]))),
             )
         )
         hedges.append(_cap_edge(rng, edge, max_edge_size))
@@ -200,7 +316,7 @@ def build_natural_hierarchy_graph(
         community_idx = int(rng.integers(0, n_communities))
         sub_idx = int(rng.integers(0, subcommunities_per_community))
         sub = subcommunities[community_idx][sub_idx]
-        local_ratio = rng.uniform(0.25, 0.48)
+        local_ratio = rng.uniform(0.25, 0.48) * large_scale
         edge = _sample(rng, sub, max(2, int(local_ratio * len(sub))))
 
         if rng.random() < 0.25:
@@ -209,7 +325,7 @@ def build_natural_hierarchy_graph(
                 max(0, sub_idx + rng.choice([-1, 1])),
             )
             neighbor = subcommunities[community_idx][neighbor_idx]
-            edge.update(_sample(rng, neighbor, max(1, int(0.03 * len(neighbor)))))
+            edge.update(_sample(rng, neighbor, max(1, int(0.03 * large_scale * len(neighbor)))))
 
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 
@@ -225,7 +341,7 @@ def build_natural_hierarchy_graph(
             sub = subcommunities[community_idx][
                 int(rng.integers(0, subcommunities_per_community))
             ]
-            high = max(3, int(0.07 * len(sub)))
+            high = max(3, int(0.07 * large_scale * len(sub)))
             edge.update(_sample(rng, sub, max(2, int(rng.integers(2, high)))))
         hedges.append(_cap_edge(rng, edge, max_edge_size))
 

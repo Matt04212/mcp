@@ -1,6 +1,9 @@
 import numpy as np
 import random
-from scipy.stats import beta as beta_dist
+
+
+def _beta_rvs(a, b, size):
+    return np.random.beta(a, b, size=size)
 
 class Hypergraph:
     def __init__(self, nhedges, nvtxs):
@@ -16,27 +19,27 @@ class Hypergraph:
         # left-skewed (FrontLoad) — most edges small
         if distribution == 'beta_right':
             max_size = kwargs.get('max_size', 500)
-            raw = beta_dist.rvs(2, 5, size=self.nhedges)
+            raw = _beta_rvs(2, 5, size=self.nhedges)
             hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
             # mean = 2/10 * 500 = 100
 
         # bell-shaped (symmetric) — replaces uniform
         elif distribution == 'beta_bell':
             max_size = kwargs.get('max_size', 500)
-            raw = beta_dist.rvs(5, 5, size=self.nhedges)
+            raw = _beta_rvs(5, 5, size=self.nhedges)
             hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
             # mean = 5/10 * 500 = 250
 
         # right-skewed (BackLoad) — most edges large
         elif distribution == 'beta_left':
             max_size = kwargs.get('max_size', 500)
-            raw = beta_dist.rvs(5, 2, size=self.nhedges)
+            raw = _beta_rvs(5, 2, size=self.nhedges)
             hedge_size = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
             # mean = 8/10 * 500 = 400
 
         elif distribution == 'uniform':
             low = kwargs.get('low', 1)
-            high = kwargs.get('high', 100)
+            high = kwargs.get('high', 500)
             hedge_size = np.random.randint(low, high+1, size=self.nhedges)
 
         elif distribution == 'dis':
@@ -158,7 +161,6 @@ class Hypergraph:
                 hedges = self.vtxs_dict[vtxs]
                 line = " ".join(str(n) for n in hedges)
                 f.write(line + "\n")
-
 
 
 

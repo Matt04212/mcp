@@ -1,0 +1,2 @@
+size,distribution,nparts,budget,budget_ratio,budget_mode,runs,whole_weighted_coverage,partition_weighted_coverage,quality_ratio,std_quality_ratio,quality_gap,quality_loss_pct,whole_time(s),partition_time(s),partition_write_time(s),partition_partition_time(s),whole_overlap_ratio,partition_overlap_ratio,min_edge_size,mean_edge_size,median_edge_size,max_edge_size,partition_wins,ties,partition_losses
+"(10000, 20000)",beta_right,2,1000,0.1,equal,1,20000.0,20000.0,1.0,0.0,0.0,0.0,16.4693,3.7925,0.4494,2.253,0.7389,0.8727,1.0,140.4035,130.0,460.0,0,1,0
