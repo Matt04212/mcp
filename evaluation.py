@@ -327,7 +327,17 @@ def evaluate_parallel_mcp(
                         'quality_loss_pct': round(
                             100.0 * (whole_weighted - partition_weighted) / whole_weighted, 4
                         ) if whole_weighted > 0 else None,
-                        'partition_minus_whole': round(partition_weighted - whole_weighted, 6),
+                        'time_saved(s)': round(
+                            whole_metrics['time(s)'] - partition_metrics['time(s)'], 6
+                        ),
+                        'time_change_pct': round(
+                            100.0 * (whole_metrics['time(s)'] - partition_metrics['time(s)'])
+                            / whole_metrics['time(s)'],
+                            4,
+                        ) if whole_metrics['time(s)'] > 0 else None,
+                        'time_ratio': round(
+                            partition_metrics['time(s)'] / whole_metrics['time(s)'], 6
+                        ) if whole_metrics['time(s)'] > 0 else None,
                         **graph_meta,
                     }
 
@@ -354,6 +364,9 @@ def evaluate_parallel_mcp(
                     'quality_loss_pct': _safe_mean(runs, 'quality_loss_pct'),
                     'whole_time(s)': _safe_mean(runs, 'whole_time(s)'),
                     'partition_time(s)': _safe_mean(runs, 'partition_time(s)'),
+                    'time_saved(s)': _safe_mean(runs, 'time_saved(s)'),
+                    'time_change_pct': _safe_mean(runs, 'time_change_pct'),
+                    'time_ratio': _safe_mean(runs, 'time_ratio'),
                     'partition_write_time(s)': _safe_mean(runs, 'partition_write_time(s)'),
                     'partition_partition_time(s)': _safe_mean(runs, 'partition_partition_time(s)'),
                     'whole_overlap_ratio': _safe_mean(runs, 'whole_overlap_ratio'),
@@ -362,9 +375,6 @@ def evaluate_parallel_mcp(
                     'mean_edge_size': _safe_mean(runs, 'mean_edge_size'),
                     'median_edge_size': _safe_mean(runs, 'median_edge_size'),
                     'max_edge_size': _safe_mean(runs, 'max_edge_size'),
-                    'partition_wins': int(sum(r['partition_minus_whole'] > 0 for r in runs)),
-                    'ties': int(sum(r['partition_minus_whole'] == 0 for r in runs)),
-                    'partition_losses': int(sum(r['partition_minus_whole'] < 0 for r in runs)),
                 })
 
     if return_details:

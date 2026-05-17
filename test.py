@@ -12,7 +12,7 @@ DIST = [
 ]
 
 SIZE = [
-    (10000, 20000),
+    (30000, 60000),
 ]
 
 NPARTS = [2]
@@ -57,9 +57,9 @@ print(
             'quality_loss_pct',
             'whole_time(s)',
             'partition_time(s)',
-            'partition_wins',
-            'ties',
-            'partition_losses',
+            'time_saved(s)',
+            'time_change_pct',
+            'time_ratio',
         ]
     ].to_string(index=False)
 )
