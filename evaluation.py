@@ -301,6 +301,7 @@ def evaluate_parallel_mcp(
                     partition_weighted = round(
                         sum(hg.vtx_weights[v] for v in partition_metrics['covered_vertices']), 6
                     )
+                    partition_stage = partition_metrics.get('stage') or {}
 
                     row = {
                         'size': (nhedges, nvtxs),
@@ -321,6 +322,15 @@ def evaluate_parallel_mcp(
                         'partition_write_time(s)': partition_metrics['write_time(s)'],
                         'partition_partition_time(s)': partition_metrics['partition_time(s)'],
                         'partition_overlap_ratio': partition_metrics['overlap_ratio'],
+                        'partition_local_greedy_time(s)': partition_stage.get('partition_local_greedy_time(s)'),
+                        'partition_estimated_parallel_local_time(s)': partition_stage.get('partition_estimated_parallel_local_time(s)'),
+                        'partition_merge_time(s)': partition_stage.get('partition_merge_time(s)'),
+                        'partition_count': partition_stage.get('partition_count'),
+                        'requested_nparts': partition_stage.get('requested_nparts'),
+                        'partition_edge_counts': partition_stage.get('partition_edge_counts'),
+                        'partition_budgets': partition_stage.get('partition_budgets'),
+                        'partition_selected_counts': partition_stage.get('partition_selected_counts'),
+                        'partition_local_times': partition_stage.get('partition_local_times'),
                         'quality_ratio': round(partition_weighted / whole_weighted, 6)
                         if whole_weighted > 0 else None,
                         'quality_gap': round(whole_weighted - partition_weighted, 6),
@@ -338,8 +348,26 @@ def evaluate_parallel_mcp(
                         'time_ratio': round(
                             partition_metrics['time(s)'] / whole_metrics['time(s)'], 6
                         ) if whole_metrics['time(s)'] > 0 else None,
+                        'estimated_parallel_time(s)': round(
+                            (partition_metrics['partition_time(s)'] or 0.0)
+                            + (partition_stage.get('partition_estimated_parallel_local_time(s)') or 0.0)
+                            + (partition_stage.get('partition_merge_time(s)') or 0.0),
+                            6,
+                        ),
                         **graph_meta,
                     }
+                    row['estimated_parallel_time_saved(s)'] = round(
+                        whole_metrics['time(s)'] - row['estimated_parallel_time(s)'],
+                        6,
+                    )
+                    row['estimated_parallel_time_change_pct'] = round(
+                        100.0 * row['estimated_parallel_time_saved(s)'] / whole_metrics['time(s)'],
+                        4,
+                    ) if whole_metrics['time(s)'] > 0 else None
+                    row['estimated_parallel_time_ratio'] = round(
+                        row['estimated_parallel_time(s)'] / whole_metrics['time(s)'],
+                        6,
+                    ) if whole_metrics['time(s)'] > 0 else None
 
                     by_nparts[nparts].append(row)
                     detail_rows.append(row)
@@ -369,6 +397,13 @@ def evaluate_parallel_mcp(
                     'time_ratio': _safe_mean(runs, 'time_ratio'),
                     'partition_write_time(s)': _safe_mean(runs, 'partition_write_time(s)'),
                     'partition_partition_time(s)': _safe_mean(runs, 'partition_partition_time(s)'),
+                    'partition_local_greedy_time(s)': _safe_mean(runs, 'partition_local_greedy_time(s)'),
+                    'partition_estimated_parallel_local_time(s)': _safe_mean(runs, 'partition_estimated_parallel_local_time(s)'),
+                    'partition_merge_time(s)': _safe_mean(runs, 'partition_merge_time(s)'),
+                    'estimated_parallel_time(s)': _safe_mean(runs, 'estimated_parallel_time(s)'),
+                    'estimated_parallel_time_saved(s)': _safe_mean(runs, 'estimated_parallel_time_saved(s)'),
+                    'estimated_parallel_time_change_pct': _safe_mean(runs, 'estimated_parallel_time_change_pct'),
+                    'estimated_parallel_time_ratio': _safe_mean(runs, 'estimated_parallel_time_ratio'),
                     'whole_overlap_ratio': _safe_mean(runs, 'whole_overlap_ratio'),
                     'partition_overlap_ratio': _safe_mean(runs, 'partition_overlap_ratio'),
                     'min_edge_size': _safe_mean(runs, 'min_edge_size'),

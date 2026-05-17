@@ -1,5 +1,5 @@
 
-
+import heapq
 import subprocess, time
 from collections import deque
 import numpy as np
@@ -252,19 +252,25 @@ def _local_greedy_on_edges(hg, part_edges, budget):
     if budget <= 0 or not part_edges:
         return covered_vertices, selected_edges
 
-    scores = np.zeros(hg.nhedges + 1, dtype=np.float64)
+    scores = np.full(hg.nhedges + 1, -1.0, dtype=np.float64)
+    heap = []
     for edge in part_edges:
-        scores[edge] = sum(hg.vtx_weights[vtx] for vtx in hg.hedges_dict[edge])
+        score = sum(hg.vtx_weights[vtx] for vtx in hg.hedges_dict[edge])
+        scores[edge] = score
+        heapq.heappush(heap, (-score, edge))
 
     while len(selected_edges) < budget:
         best_edge = None
         best_score = 0.0
-        for edge in part_edges:
+        while heap:
+            neg_score, edge = heapq.heappop(heap)
             if edge in selected_edges:
                 continue
-            if scores[edge] > best_score:
-                best_edge = edge
-                best_score = scores[edge]
+            if not np.isclose(-neg_score, scores[edge]):
+                continue
+            best_edge = edge
+            best_score = scores[edge]
+            break
 
         if best_edge is None or best_score <= 0:
             break
@@ -284,6 +290,7 @@ def _local_greedy_on_edges(hg, part_edges, budget):
             for edge in hg.vtxs_dict[vtx]:
                 if edge in part_edges and edge not in selected_edges:
                     scores[edge] -= weight
+                    heapq.heappush(heap, (-scores[edge], edge))
 
     return covered_vertices, selected_edges
 
@@ -333,8 +340,8 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         result = subprocess.run(
-            ["./hmetis", filename, str(nparts), "3", "5", "5", "2", "3", "0", "0"],
-            timeout=timeout, capture_output=True, text=True
+            ["./hmetis", filename, str(nparts), "5", "1", "5", "3", "1", "0", "0"],
+            timeout=timeout, capture_output=False, text=True
         )
     except subprocess.TimeoutExpired:
         print(f"  [warn] hMETIS timed out after {timeout}s")
@@ -635,22 +642,31 @@ def hmetis_partitioned_greedy_mcp(
         part: len(part_edges) for part, part_edges in partitions.items()
     }
     partition_selected_counts = {}
+    local_greedy_time = 0.0
+    local_partition_times = {}
 
     for part, part_edges in partitions.items():
+        local_start = time.time()
         _, local_selected = _local_greedy_on_edges(
             hg,
             part_edges,
             budgets.get(part, 0),
         )
+        part_time = time.time() - local_start
+        local_greedy_time += part_time
+        local_partition_times[part] = round(part_time, 4)
         partition_selected_counts[part] = len(local_selected)
         selected_edges.update(local_selected)
 
+    merge_start = time.time()
     covered_vertices = set()
     for edge in selected_edges:
         covered_vertices.update(hg.hedges_dict[edge])
+    merge_time = time.time() - merge_start
 
     part_sizes = [len(edges) for edges in partitions.values()]
     nonzero_budgets = [value for value in budgets.values() if value > 0]
+    estimated_parallel_local_time = max(local_partition_times.values()) if local_partition_times else 0.0
     stages = {
         "partition_count": len(partitions),
         "budget_mode": budget_mode,
@@ -671,6 +687,12 @@ def hmetis_partitioned_greedy_mcp(
         ),
         "partition_selected_counts": str(
             [(part, partition_selected_counts.get(part, 0)) for part in sorted(partitions)]
+        ),
+        "partition_local_greedy_time(s)": round(local_greedy_time, 4),
+        "partition_estimated_parallel_local_time(s)": round(estimated_parallel_local_time, 4),
+        "partition_merge_time(s)": round(merge_time, 4),
+        "partition_local_times": str(
+            [(part, local_partition_times.get(part, 0.0)) for part in sorted(partitions)]
         ),
         "wall_time_s": round(time.time() - start_time, 4),
     }
