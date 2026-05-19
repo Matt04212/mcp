@@ -7,6 +7,7 @@ import pandas as pd
 from algo import (
     hmetis_partitioned_greedy_mcp,
     hype_partitioned_greedy_mcp,
+    hype_old_partitioned_greedy_mcp,
     pure_greedy_mcp,
     random_partitioned_greedy_mcp,
 )
@@ -25,10 +26,10 @@ DIST = [
 ]
 
 SIZE = [
-    (2500, 5000),
+    #(2500, 5000),
     #(5000, 10000),
     #(7500, 15000),
-    #(10000, 20000),
+    (10000, 20000),
     #(20000, 40000),
     #(30000, 60000),
     #(50000, 100000),
@@ -63,6 +64,16 @@ PARTITION_METHODS = {
     'hype': {
         'enabled': True,
         'func': hype_partitioned_greedy_mcp,
+        'kwargs': {
+            'hype_params': {
+                'fringe_size': 10,
+                'fringe_candidates': 2,
+            },
+        },
+    },
+    'hype_old': {
+        'enabled': True,
+        'func': hype_old_partitioned_greedy_mcp,
         'kwargs': {
             'hype_params': {
                 'fringe_size': 10,

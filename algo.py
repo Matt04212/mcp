@@ -530,6 +530,8 @@ def _hype_fixed_partitions(hg, nparts, seed=None, fringe_size=10, fringe_candida
     neighbor_cache = {}
     net_size_cache = {net: len(hg.vtxs_dict[net]) for net in hg.vtxs}
     unassigned = set(hg.hedges)
+    unassigned_list = list(hg.hedges)
+    unassigned_pos = {edge: idx for idx, edge in enumerate(unassigned_list)}
     partitions = {part: set() for part in range(cur_nparts)}
 
     def neighbors(edge):
@@ -544,10 +546,20 @@ def _hype_fixed_partitions(hg, nparts, seed=None, fringe_size=10, fringe_candida
     def external_neighbors_score(edge, fringe):
         return len(neighbors(edge) - fringe)
 
+    def remove_unassigned(edge):
+        if edge not in unassigned:
+            return
+        unassigned.remove(edge)
+        idx = unassigned_pos.pop(edge)
+        last_edge = unassigned_list.pop()
+        if idx < len(unassigned_list):
+            unassigned_list[idx] = last_edge
+            unassigned_pos[last_edge] = idx
+
     def random_unassigned_vertex():
-        if not unassigned:
+        if not unassigned_list:
             return None
-        return rng.choice(tuple(unassigned))
+        return unassigned_list[rng.randrange(len(unassigned_list))]
 
     for part in range(cur_nparts):
         target = target_sizes[part]
@@ -557,24 +569,31 @@ def _hype_fixed_partitions(hg, nparts, seed=None, fringe_size=10, fringe_candida
         core = set()
         fringe = set()
         cache = {}
+        incident_nets = set()
+        ordered_nets = []
+        ordered_nets_dirty = False
 
         seed_edge = random_unassigned_vertex()
         if seed_edge is None:
             break
         core.add(seed_edge)
         partitions[part].add(seed_edge)
-        unassigned.remove(seed_edge)
+        remove_unassigned(seed_edge)
+        incident_nets.update(hg.hedges_dict[seed_edge])
+        ordered_nets = sorted(
+            incident_nets,
+            key=lambda net: (net_size_cache[net], net),
+        )
 
         while len(core) < target and unassigned:
             # Algorithm 2: determine r fringe candidate vertices
             fringe_candidates_set = set()
-            incident_nets = set()
-            for edge in core:
-                incident_nets.update(hg.hedges_dict[edge])
-            ordered_nets = sorted(
-                incident_nets,
-                key=lambda net: (net_size_cache[net], net),
-            )
+            if ordered_nets_dirty:
+                ordered_nets = sorted(
+                    incident_nets,
+                    key=lambda net: (net_size_cache[net], net),
+                )
+                ordered_nets_dirty = False
 
             for net in ordered_nets:
                 for edge in hg.vtxs_dict[net]:
@@ -611,9 +630,117 @@ def _hype_fixed_partitions(hg, nparts, seed=None, fringe_size=10, fringe_candida
             fringe.remove(chosen)
             core.add(chosen)
             partitions[part].add(chosen)
-            unassigned.remove(chosen)
+            remove_unassigned(chosen)
+
+            new_nets = hg.hedges_dict[chosen] - incident_nets
+            if new_nets:
+                incident_nets.update(new_nets)
+                ordered_nets_dirty = True
 
         # Any leftover unassigned vertices are handled by later partitions / final sweep.
+
+    if unassigned:
+        ordered_parts = sorted(partitions, key=lambda part: len(partitions[part]))
+        for idx, edge in enumerate(sorted(unassigned)):
+            partitions[ordered_parts[idx % len(ordered_parts)]].add(edge)
+
+    return partitions, 0.0, 0.0
+
+
+def _hype_fixed_partitions_old(hg, nparts, seed=None, fringe_size=10, fringe_candidates=2):
+    cur_nparts = min(nparts, hg.nhedges)
+    if cur_nparts <= 1:
+        return {0: set(hg.hedges)}, 0.0, 0.0
+
+    rng = random.Random(seed)
+    s = max(1, int(fringe_size))
+    r = max(1, int(fringe_candidates))
+
+    target_sizes = [hg.nhedges // cur_nparts] * cur_nparts
+    for idx in range(hg.nhedges % cur_nparts):
+        target_sizes[idx] += 1
+
+    neighbor_cache = {}
+    net_size_cache = {net: len(hg.vtxs_dict[net]) for net in hg.vtxs}
+    unassigned = set(hg.hedges)
+    partitions = {part: set() for part in range(cur_nparts)}
+
+    def neighbors(edge):
+        if edge not in neighbor_cache:
+            nbrs = set()
+            for net in hg.hedges_dict[edge]:
+                nbrs.update(hg.vtxs_dict[net])
+            nbrs.discard(edge)
+            neighbor_cache[edge] = nbrs
+        return neighbor_cache[edge]
+
+    def external_neighbors_score(edge, fringe):
+        return len(neighbors(edge) - fringe)
+
+    def random_unassigned_vertex():
+        if not unassigned:
+            return None
+        return rng.choice(tuple(unassigned))
+
+    for part in range(cur_nparts):
+        target = target_sizes[part]
+        if target <= 0 or not unassigned:
+            continue
+
+        core = set()
+        fringe = set()
+        cache = {}
+
+        seed_edge = random_unassigned_vertex()
+        if seed_edge is None:
+            break
+        core.add(seed_edge)
+        partitions[part].add(seed_edge)
+        unassigned.remove(seed_edge)
+
+        while len(core) < target and unassigned:
+            fringe_candidates_set = set()
+            incident_nets = set()
+            for edge in core:
+                incident_nets.update(hg.hedges_dict[edge])
+            ordered_nets = sorted(
+                incident_nets,
+                key=lambda net: (net_size_cache[net], net),
+            )
+
+            for net in ordered_nets:
+                for edge in hg.vtxs_dict[net]:
+                    if edge in fringe or edge in core or edge not in unassigned:
+                        continue
+                    fringe_candidates_set.add(edge)
+                    if len(fringe_candidates_set) >= r:
+                        break
+                if len(fringe_candidates_set) >= r:
+                    break
+
+            for edge in fringe_candidates_set:
+                if edge not in cache:
+                    cache[edge] = external_neighbors_score(edge, fringe)
+
+            ranked_fringe = sorted(
+                fringe | fringe_candidates_set,
+                key=lambda edge: (cache.get(edge, float("inf")), edge),
+            )
+            fringe = set(ranked_fringe[:s])
+
+            if not fringe:
+                random_edge = random_unassigned_vertex()
+                if random_edge is None:
+                    break
+                fringe = {random_edge}
+                if random_edge not in cache:
+                    cache[random_edge] = external_neighbors_score(random_edge, set())
+
+            chosen = min(fringe, key=lambda edge: (cache.get(edge, float("inf")), edge))
+            fringe.remove(chosen)
+            core.add(chosen)
+            partitions[part].add(chosen)
+            unassigned.remove(chosen)
 
     if unassigned:
         ordered_parts = sorted(partitions, key=lambda part: len(partitions[part]))
@@ -676,6 +803,17 @@ def _fixed_partitions(hg, filename, nparts, timeout, method="hmetis", seed=None,
     if method == "hype":
         hype_params = partition_kwargs.get("hype_params") or {}
         partitions, _, _ = _hype_fixed_partitions(
+            hg,
+            nparts,
+            seed=seed,
+            fringe_size=hype_params.get("fringe_size", 10),
+            fringe_candidates=hype_params.get("fringe_candidates", 2),
+        )
+        return partitions, 0.0, time.time() - start
+
+    if method == "hype_old":
+        hype_params = partition_kwargs.get("hype_params") or {}
+        partitions, _, _ = _hype_fixed_partitions_old(
             hg,
             nparts,
             seed=seed,
@@ -1362,6 +1500,29 @@ def hype_partitioned_greedy_mcp(
         timeout=timeout,
         budget_mode=budget_mode,
         partition_method="hype",
+        partition_seed=partition_seed,
+        **kwargs,
+    )
+
+
+def hype_old_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="hype_old",
         partition_seed=partition_seed,
         **kwargs,
     )
