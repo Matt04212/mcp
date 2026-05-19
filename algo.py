@@ -1,11 +1,29 @@
 
 import heapq
-import multiprocessing
+import os
+import random
 import subprocess, time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import deque
 import numpy as np
 from subgraph2 import HgrWriter, write_hgr
+
+
+HMETIS_UBFACTOR = "5"
+HMETIS_NRUNS = "1"
+HMETIS_CTYPE = "5"
+HMETIS_RTYPE = "3"
+HMETIS_VCYCLE = "0"
+HMETIS_RECONST = "0"
+HMETIS_DBGLVL = "0"
+DEFAULT_HMETIS_PARAMS = {
+    "ubfactor": HMETIS_UBFACTOR,
+    "nruns": HMETIS_NRUNS,
+    "ctype": HMETIS_CTYPE,
+    "rtype": HMETIS_RTYPE,
+    "vcycle": HMETIS_VCYCLE,
+    "reconst": HMETIS_RECONST,
+    "dbglvl": HMETIS_DBGLVL,
+}
 
 def _build_scores(hg, covered_vertices, removed_edges):
     scores = np.zeros(hg.nhedges + 1, dtype=np.float64)
@@ -191,31 +209,309 @@ def _hmetis_candidate_pool(hg, filename, selected_edges, covered_vertices,
     return list(candidates), parse_time, partition_time
 
 
-def _hmetis_fixed_partitions(hg, filename, nparts, timeout):
+def _hmetis_fixed_partitions(hg, filename, nparts, timeout, hmetis_params=None):
     e_map_inv = write_hgr(hg, set(), set(), filename)
     cur_nparts = min(nparts, len(e_map_inv))
     if cur_nparts <= 1:
         return {}, 0.0, 0.0
 
     p = time.time()
-    ok = _run_hmetis(filename, cur_nparts, timeout=timeout)
+    ok = _run_hmetis(filename, cur_nparts, timeout=timeout, hmetis_params=hmetis_params)
     partition_time = time.time() - p
     if not ok:
         return {}, 0.0, partition_time
 
-    with open(f"{filename}.part.{cur_nparts}") as f:
-        line = f.read().splitlines()
-    if len(line) != len(e_map_inv):
-        print(
-            f"  [warn] hMETIS partition line count mismatch: "
-            f"expected {len(e_map_inv)}, got {len(line)}"
+    p2 = time.time()
+    partitions = _read_partition_file(
+        f"{filename}.part.{cur_nparts}",
+        e_map_inv,
+        label="hMETIS",
+    )
+    parse_time = time.time() - p2
+    if partitions is None:
+        return {}, 0.0, partition_time
+    return partitions, parse_time, partition_time
+
+
+def _random_fixed_partitions(hg, nparts, seed=None):
+    cur_nparts = min(nparts, hg.nhedges)
+    if cur_nparts <= 1:
+        return {0: set(hg.hedges)}, 0.0, 0.0
+
+    rng = random.Random(seed)
+    edges = list(hg.hedges)
+    rng.shuffle(edges)
+
+    partitions = {part: set() for part in range(cur_nparts)}
+    for idx, edge in enumerate(edges):
+        partitions[idx % cur_nparts].add(edge)
+    return partitions, 0.0, 0.0
+
+
+def _overlap_greedy_fixed_partitions(hg, nparts, seed=None):
+    cur_nparts = min(nparts, hg.nhedges)
+    if cur_nparts <= 1:
+        return {0: set(hg.hedges)}, 0.0, 0.0
+
+    rng = random.Random(seed)
+    edges = list(hg.hedges)
+    rng.shuffle(edges)
+    edges.sort(key=lambda edge: (-len(hg.hedges_dict[edge]), edge))
+
+    partitions = {part: set() for part in range(cur_nparts)}
+    part_vertices = {part: set() for part in range(cur_nparts)}
+    part_loads = {part: 0 for part in range(cur_nparts)}
+    target_load = max(1.0, len(edges) / cur_nparts)
+
+    for edge in edges:
+        edge_vertices = hg.hedges_dict[edge]
+        best_part = None
+        best_score = None
+        best_load = None
+
+        for part in range(cur_nparts):
+            overlap = len(edge_vertices & part_vertices[part])
+            load_penalty = part_loads[part] / target_load
+            score = overlap - load_penalty
+            if (
+                best_score is None
+                or score > best_score
+                or (np.isclose(score, best_score) and part_loads[part] < best_load)
+                or (
+                    np.isclose(score, best_score)
+                    and part_loads[part] == best_load
+                    and part < best_part
+                )
+            ):
+                best_part = part
+                best_score = score
+                best_load = part_loads[part]
+
+        partitions[best_part].add(edge)
+        part_vertices[best_part].update(edge_vertices)
+        part_loads[best_part] += 1
+
+    return partitions, 0.0, 0.0
+
+
+def _write_patoh_hypergraph(hg, filename):
+    live_edges = list(hg.hedges)
+    e_map = {edge: idx + 1 for idx, edge in enumerate(live_edges)}
+    e_map_inv = {idx + 1: edge for idx, edge in enumerate(live_edges)}
+
+    nets = []
+    pin_count = 0
+    for vtx in hg.vtxs:
+        incident = [e_map[edge] for edge in hg.vtxs_dict[vtx] if edge in e_map]
+        if incident:
+            nets.append(sorted(incident))
+            pin_count += len(incident)
+
+    with open(filename, "w") as f:
+        f.write(f"1 {len(live_edges)} {len(nets)} {pin_count}\n")
+        for net in nets:
+            f.write(" ".join(map(str, net)) + "\n")
+
+    return e_map_inv
+
+
+def _run_patoh(binary_path, filename, nparts, timeout=120, seed=None, extra_args=None):
+    part_file = f"{filename}.part.{nparts}"
+    if os.path.exists(part_file):
+        os.remove(part_file)
+
+    cmd = [binary_path, filename, str(nparts)]
+    if seed is not None:
+        cmd.append(f"SD={int(seed)}")
+    for arg in extra_args or []:
+        cmd.append(str(arg))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            timeout=timeout,
+            capture_output=True,
+            text=True,
         )
+    except subprocess.TimeoutExpired:
+        print(f"  [warn] PaToH timed out after {timeout}s")
+        return False
+
+    if not os.path.exists(part_file):
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            detail = f": {stderr}" if stderr else ""
+            if not detail and stdout:
+                detail = f": {stdout.splitlines()[-1]}"
+            print(f"  [warn] PaToH exited with code {result.returncode}{detail}")
+        print("  [warn] PaToH did not produce partition file")
+        return False
+
+    return True
+
+
+def _patoh_fixed_partitions(hg, filename, nparts, timeout, binary_path, seed=None, extra_args=None):
+    if not binary_path:
+        raise ValueError("PaToH binary path is required")
+    if not os.path.exists(binary_path):
+        raise FileNotFoundError(f"PaToH binary not found: {binary_path}")
+
+    e_map_inv = _write_patoh_hypergraph(hg, filename)
+    cur_nparts = min(nparts, len(e_map_inv))
+    if cur_nparts <= 1:
+        return {}, 0.0, 0.0
+
+    start = time.time()
+    ok = _run_patoh(
+        binary_path,
+        filename,
+        cur_nparts,
+        timeout=timeout,
+        seed=seed,
+        extra_args=extra_args,
+    )
+    partition_time = time.time() - start
+    if not ok:
         return {}, 0.0, partition_time
 
-    p2 = time.time()
-    partitions = _parse_partitions(line, e_map_inv)
-    parse_time = time.time() - p2
+    parse_start = time.time()
+    partitions = _read_partition_file(
+        f"{filename}.part.{cur_nparts}",
+        e_map_inv,
+        label="PaToH",
+    )
+    parse_time = time.time() - parse_start
+    if partitions is None:
+        return {}, 0.0, partition_time
     return partitions, parse_time, partition_time
+
+
+def _hype_fixed_partitions(hg, nparts, seed=None):
+    cur_nparts = min(nparts, hg.nhedges)
+    if cur_nparts <= 1:
+        return {0: set(hg.hedges)}, 0.0, 0.0
+
+    rng = random.Random(seed)
+    edge_order = list(hg.hedges)
+    rng.shuffle(edge_order)
+    edge_order.sort(key=lambda edge: (-len(hg.hedges_dict[edge]), edge))
+
+    target_sizes = [hg.nhedges // cur_nparts] * cur_nparts
+    for i in range(hg.nhedges % cur_nparts):
+        target_sizes[i] += 1
+
+    neighbor_cache = {}
+
+    def neighbors(edge):
+        if edge not in neighbor_cache:
+            nbrs = set()
+            for vtx in hg.hedges_dict[edge]:
+                nbrs.update(hg.vtxs_dict[vtx])
+            nbrs.discard(edge)
+            neighbor_cache[edge] = nbrs
+        return neighbor_cache[edge]
+
+    unassigned = set(hg.hedges)
+    partitions = {part: set() for part in range(cur_nparts)}
+
+    for part in range(cur_nparts):
+        target = target_sizes[part]
+        if target <= 0 or not unassigned:
+            continue
+
+        seed_edge = None
+        for edge in edge_order:
+            if edge in unassigned:
+                seed_edge = edge
+                break
+        if seed_edge is None:
+            break
+
+        partitions[part].add(seed_edge)
+        unassigned.remove(seed_edge)
+        core_vertices = set(hg.hedges_dict[seed_edge])
+        fringe = set(neighbors(seed_edge)) & unassigned
+
+        while len(partitions[part]) < target and unassigned:
+            if not fringe:
+                remaining = sorted(
+                    unassigned,
+                    key=lambda edge: (-len(hg.hedges_dict[edge]), edge),
+                )
+                chosen = remaining[0]
+            else:
+                chosen = max(
+                    fringe,
+                    key=lambda edge: (
+                        len(hg.hedges_dict[edge] & core_vertices),
+                        -len(hg.hedges_dict[edge] - core_vertices),
+                        -len(neighbors(edge) & unassigned),
+                        -edge,
+                    ),
+                )
+
+            partitions[part].add(chosen)
+            unassigned.remove(chosen)
+            fringe.discard(chosen)
+            newly_seen = hg.hedges_dict[chosen] - core_vertices
+            core_vertices.update(hg.hedges_dict[chosen])
+            fringe.update(neighbors(chosen) & unassigned)
+
+            if newly_seen:
+                fringe = {
+                    edge for edge in fringe
+                    if edge in unassigned
+                }
+
+    if unassigned:
+        ordered_parts = sorted(partitions, key=lambda part: len(partitions[part]))
+        for idx, edge in enumerate(sorted(unassigned)):
+            partitions[ordered_parts[idx % len(ordered_parts)]].add(edge)
+
+    return partitions, 0.0, 0.0
+
+
+def _fixed_partitions(hg, filename, nparts, timeout, method="hmetis", seed=None, **partition_kwargs):
+    start = time.time()
+
+    if method == "hmetis":
+        partitions, parse_time, partition_time = _hmetis_fixed_partitions(
+            hg,
+            filename,
+            nparts,
+            timeout,
+            hmetis_params=partition_kwargs.get("hmetis_params"),
+        )
+        write_time = max(0.0, time.time() - start - partition_time - parse_time)
+        return partitions, write_time, partition_time
+
+    if method == "random":
+        partitions, _, _ = _random_fixed_partitions(hg, nparts, seed=seed)
+        return partitions, 0.0, time.time() - start
+
+    if method in {"overlap_greedy", "streaming_overlap"}:
+        partitions, _, _ = _overlap_greedy_fixed_partitions(hg, nparts, seed=seed)
+        return partitions, 0.0, time.time() - start
+
+    if method == "patoh":
+        partitions, parse_time, partition_time = _patoh_fixed_partitions(
+            hg,
+            filename,
+            nparts,
+            timeout,
+            binary_path=partition_kwargs.get("patoh_binary"),
+            seed=seed,
+            extra_args=partition_kwargs.get("patoh_args"),
+        )
+        write_time = max(0.0, time.time() - start - partition_time - parse_time)
+        return partitions, write_time, partition_time
+
+    if method == "hype":
+        partitions, _, _ = _hype_fixed_partitions(hg, nparts, seed=seed)
+        return partitions, 0.0, time.time() - start
+
+    raise ValueError(f"unknown partition method: {method}")
 
 
 def _allocate_partition_budgets(partitions, budget, mode="equal"):
@@ -301,11 +597,101 @@ def _local_greedy_on_edges(hg, part_edges, budget):
     return covered_vertices, selected_edges
 
 
-def _local_greedy_partition_worker(args):
-    part, hg, part_edges, budget = args
-    start = time.time()
-    _, local_selected = _local_greedy_on_edges(hg, part_edges, budget)
-    return part, local_selected, time.time() - start
+def _run_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    fallback_to_greedy=False,
+    partition_method="hmetis",
+    partition_seed=None,
+    **kwargs,
+):
+    start_time = time.time()
+    partitions, write_time, partition_time = _fixed_partitions(
+        hg,
+        filename,
+        nparts,
+        timeout,
+        method=partition_method,
+        seed=partition_seed,
+        **kwargs,
+    )
+
+    if not partitions:
+        if fallback_to_greedy:
+            return pure_greedy_mcp(hg, budget=budget, filename=filename)
+        raise RuntimeError(f"{partition_method} partitioning failed for partitioned greedy")
+
+    budgets = _allocate_partition_budgets(partitions, budget, mode=budget_mode)
+    selected_edges = set()
+    partition_edge_counts = {
+        part: len(part_edges) for part, part_edges in partitions.items()
+    }
+    partition_selected_counts = {}
+    local_greedy_time = 0.0
+    local_partition_times = {}
+    local_wall_start = time.time()
+
+    for part, part_edges in partitions.items():
+        local_start = time.time()
+        _, local_selected = _local_greedy_on_edges(
+            hg,
+            part_edges,
+            budgets.get(part, 0),
+        )
+        part_time = time.time() - local_start
+        local_greedy_time += part_time
+        local_partition_times[part] = round(part_time, 4)
+        partition_selected_counts[part] = len(local_selected)
+        selected_edges.update(local_selected)
+
+    local_wall_time = time.time() - local_wall_start
+
+    merge_start = time.time()
+    covered_vertices = set()
+    for edge in selected_edges:
+        covered_vertices.update(hg.hedges_dict[edge])
+    merge_time = time.time() - merge_start
+
+    part_sizes = [len(edges) for edges in partitions.values()]
+    nonzero_budgets = [value for value in budgets.values() if value > 0]
+    estimated_parallel_local_time = max(local_partition_times.values()) if local_partition_times else 0.0
+    stages = {
+        "partition_method": partition_method,
+        "partition_count": len(partitions),
+        "budget_mode": budget_mode,
+        "requested_nparts": nparts,
+        "min_partition_edges": min(part_sizes) if part_sizes else None,
+        "mean_partition_edges": round(float(np.mean(part_sizes)), 4) if part_sizes else None,
+        "max_partition_edges": max(part_sizes) if part_sizes else None,
+        "min_partition_budget": min(nonzero_budgets) if nonzero_budgets else 0,
+        "max_partition_budget": max(nonzero_budgets) if nonzero_budgets else 0,
+        "total_assigned_budget": int(sum(budgets.values())),
+        "requested_budget": budget,
+        "selected_edges": len(selected_edges),
+        "partition_edge_counts": str(
+            [(part, partition_edge_counts[part]) for part in sorted(partitions)]
+        ),
+        "partition_budgets": str(
+            [(part, budgets.get(part, 0)) for part in sorted(partitions)]
+        ),
+        "partition_selected_counts": str(
+            [(part, partition_selected_counts.get(part, 0)) for part in sorted(partitions)]
+        ),
+        "partition_local_greedy_time(s)": round(local_greedy_time, 4),
+        "partition_local_wall_time(s)": round(local_wall_time, 4),
+        "partition_estimated_parallel_local_time(s)": round(estimated_parallel_local_time, 4),
+        "partition_merge_time(s)": round(merge_time, 4),
+        "partition_local_times": str(
+            [(part, local_partition_times.get(part, 0.0)) for part in sorted(partitions)]
+        ),
+        "wall_time_s": round(time.time() - start_time, 4),
+    }
+
+    return (hg.nhedges, hg.nvtxs), covered_vertices, selected_edges, write_time, partition_time, stages
 
 
 def _parse_partitions(line, e_map_inv):
@@ -313,6 +699,26 @@ def _parse_partitions(line, e_map_inv):
     for edge, part in enumerate(line, start=1):
         original_edge = e_map_inv[edge]
         partitions.setdefault(int(part), set()).add(original_edge)
+    return partitions
+
+
+def _read_partition_file(part_file, e_map_inv, label):
+    partitions = {}
+    count = 0
+    with open(part_file) as f:
+        for count, raw in enumerate(f, start=1):
+            part = raw.strip()
+            if not part:
+                continue
+            original_edge = e_map_inv[count]
+            partitions.setdefault(int(part), set()).add(original_edge)
+
+    if count != len(e_map_inv):
+        print(
+            f"  [warn] {label} partition line count mismatch: "
+            f"expected {len(e_map_inv)}, got {count}"
+        )
+        return None
     return partitions
 
 
@@ -343,9 +749,10 @@ def _greedy_fallback(hg, covered_vertices, removed_edges, scores, budget=None):
             _update_scores(hg, scores, newly_covered, removed_edges)
 
 
-def _run_hmetis(filename, nparts, timeout=120):
-    import os
+def _run_hmetis(filename, nparts, timeout=120, hmetis_params=None):
     part_file = f"{filename}.part.{nparts}"
+    params = dict(DEFAULT_HMETIS_PARAMS)
+    params.update({k: str(v) for k, v in (hmetis_params or {}).items()})
 
     # remove stale partition file so we can detect if hMETIS fails to write
     if os.path.exists(part_file):
@@ -353,8 +760,22 @@ def _run_hmetis(filename, nparts, timeout=120):
 
     try:
         result = subprocess.run(
-            ["./hmetis", filename, str(nparts), "5", "1", "5", "3", "1", "0", "0"],
-            timeout=timeout, capture_output=True, text=True
+            [
+                "./hmetis",
+                filename,
+                str(nparts),
+                params["ubfactor"],
+                params["nruns"],
+                params["ctype"],
+                params["rtype"],
+                params["vcycle"],
+                params["reconst"],
+                params["dbglvl"],
+            ],
+            timeout=timeout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
     except subprocess.TimeoutExpired:
         print(f"  [warn] hMETIS timed out after {timeout}s")
@@ -363,12 +784,7 @@ def _run_hmetis(filename, nparts, timeout=120):
     # check if hMETIS actually wrote the file
     if not os.path.exists(part_file):
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            stdout = (result.stdout or "").strip()
-            detail = f": {stderr}" if stderr else ""
-            if not detail and stdout:
-                detail = f": {stdout.splitlines()[-1]}"
-            print(f"  [warn] hMETIS exited with code {result.returncode}{detail}")
+            print(f"  [warn] hMETIS exited with code {result.returncode}")
         print(f"  [warn] hMETIS did not produce partition file ??likely crashed")
         return False
 
@@ -631,7 +1047,6 @@ def hmetis_partitioned_greedy_mcp(
     timeout=120,
     budget_mode="equal",
     fallback_to_greedy=False,
-    max_workers=None,
     **kwargs,
 ):
     """
@@ -641,117 +1056,190 @@ def hmetis_partitioned_greedy_mcp(
     union of all local choices, evaluated on the original whole graph. This
     models embarrassingly parallel greedy with no cross-partition coordination.
     """
-    start_time = time.time()
-    partition_call_start = time.time()
-    partitions, parse_time, partition_time = _hmetis_fixed_partitions(
-        hg, filename, nparts, timeout
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        fallback_to_greedy=fallback_to_greedy,
+        partition_method="hmetis",
+        **kwargs,
     )
-    write_time = max(0.0, time.time() - partition_call_start - partition_time - parse_time)
+
+
+def random_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="random",
+        partition_seed=partition_seed,
+        **kwargs,
+    )
+
+
+def overlap_greedy_partitioned_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="overlap_greedy",
+        partition_seed=partition_seed,
+        **kwargs,
+    )
+
+
+def patoh_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    patoh_binary="./patoh",
+    patoh_args=None,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="patoh",
+        partition_seed=partition_seed,
+        patoh_binary=patoh_binary,
+        patoh_args=patoh_args,
+        **kwargs,
+    )
+
+
+def hype_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="hype",
+        partition_seed=partition_seed,
+        **kwargs,
+    )
+
+
+def hmetis_one_shot_pool_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    top_per_partition=3,
+    global_top_k=None,
+    pool_factor=2.0,
+    overlap_penalty=0.0,
+    hmetis_params=None,
+    **kwargs,
+):
+    """
+    Partition once with hMETIS, collect a small candidate pool from each
+    partition, then run greedy globally on just that reduced pool.
+
+    This keeps hMETIS as a one-time structural preprocessor instead of a hard
+    local-budget wall, which often aligns better with MCP than independent
+    per-partition greedy.
+    """
+    start_time = time.time()
+    partitions, parse_time, partition_time = _hmetis_fixed_partitions(
+        hg,
+        filename,
+        nparts,
+        timeout,
+        hmetis_params=hmetis_params,
+    )
+    write_time = parse_time
 
     if not partitions:
-        if fallback_to_greedy:
-            return pure_greedy_mcp(hg, budget=budget, filename=filename)
-        raise RuntimeError("hMETIS partitioning failed for partitioned greedy")
+        return pure_greedy_mcp(hg, budget=budget, filename=filename)
 
-    budgets = _allocate_partition_budgets(partitions, budget, mode=budget_mode)
-    selected_edges = set()
-    partition_edge_counts = {
-        part: len(part_edges) for part, part_edges in partitions.items()
-    }
-    partition_selected_counts = {}
-    local_greedy_time = 0.0
-    local_partition_times = {}
-    worker_count = min(len(partitions), max_workers or len(partitions))
-    local_wall_start = time.time()
-
-    if worker_count <= 1:
-        for part, part_edges in partitions.items():
-            local_start = time.time()
-            _, local_selected = _local_greedy_on_edges(
+    scores = _build_scores(hg, set(), set())
+    candidate_edges = set()
+    for part_edges in partitions.values():
+        candidate_edges.update(
+            _top_partition_candidates(
                 hg,
                 part_edges,
-                budgets.get(part, 0),
+                set(),
+                set(),
+                scores,
+                top_per_partition,
+                overlap_penalty,
             )
-            part_time = time.time() - local_start
-            local_greedy_time += part_time
-            local_partition_times[part] = round(part_time, 4)
-            partition_selected_counts[part] = len(local_selected)
-            selected_edges.update(local_selected)
-    else:
-        try:
-            mp_context = None
-            try:
-                mp_context = multiprocessing.get_context("fork")
-            except ValueError:
-                mp_context = multiprocessing.get_context()
+        )
 
-            tasks = [
-                (part, hg, part_edges, budgets.get(part, 0))
-                for part, part_edges in partitions.items()
-            ]
-            with ProcessPoolExecutor(max_workers=worker_count, mp_context=mp_context) as executor:
-                futures = [executor.submit(_local_greedy_partition_worker, task) for task in tasks]
-                for future in as_completed(futures):
-                    part, local_selected, part_time = future.result()
-                    local_greedy_time += part_time
-                    local_partition_times[part] = round(part_time, 4)
-                    partition_selected_counts[part] = len(local_selected)
-                    selected_edges.update(local_selected)
-        except (OSError, PermissionError) as exc:
-            print(f"  [warn] process pool unavailable, falling back to sequential local greedy: {exc}")
-            worker_count = 1
-            for part, part_edges in partitions.items():
-                local_start = time.time()
-                _, local_selected = _local_greedy_on_edges(
-                    hg,
-                    part_edges,
-                    budgets.get(part, 0),
-                )
-                part_time = time.time() - local_start
-                local_greedy_time += part_time
-                local_partition_times[part] = round(part_time, 4)
-                partition_selected_counts[part] = len(local_selected)
-                selected_edges.update(local_selected)
-    local_wall_time = time.time() - local_wall_start
+    target_pool_size = max(budget, int(np.ceil(pool_factor * budget)))
+    if global_top_k is None:
+        global_top_k = target_pool_size
+    if global_top_k > 0 and len(candidate_edges) < target_pool_size:
+        candidate_edges.update(_top_global_candidates(hg, set(), scores, global_top_k))
 
-    merge_start = time.time()
-    covered_vertices = set()
-    for edge in selected_edges:
-        covered_vertices.update(hg.hedges_dict[edge])
-    merge_time = time.time() - merge_start
+    greedy_start = time.time()
+    covered_vertices, selected_edges = _local_greedy_on_edges(hg, candidate_edges, budget)
+    candidate_greedy_time = time.time() - greedy_start
 
-    part_sizes = [len(edges) for edges in partitions.values()]
-    nonzero_budgets = [value for value in budgets.values() if value > 0]
-    estimated_parallel_local_time = max(local_partition_times.values()) if local_partition_times else 0.0
     stages = {
+        "partition_method": "hmetis_one_shot_pool",
         "partition_count": len(partitions),
-        "budget_mode": budget_mode,
         "requested_nparts": nparts,
-        "min_partition_edges": min(part_sizes) if part_sizes else None,
-        "mean_partition_edges": round(float(np.mean(part_sizes)), 4) if part_sizes else None,
-        "max_partition_edges": max(part_sizes) if part_sizes else None,
-        "min_partition_budget": min(nonzero_budgets) if nonzero_budgets else 0,
-        "max_partition_budget": max(nonzero_budgets) if nonzero_budgets else 0,
-        "total_assigned_budget": int(sum(budgets.values())),
-        "requested_budget": budget,
-        "selected_edges": len(selected_edges),
+        "candidate_pool_size": len(candidate_edges),
+        "top_per_partition": top_per_partition,
+        "global_top_k": global_top_k,
+        "pool_factor": pool_factor,
         "partition_edge_counts": str(
-            [(part, partition_edge_counts[part]) for part in sorted(partitions)]
+            [(part, len(partitions[part])) for part in sorted(partitions)]
         ),
-        "partition_budgets": str(
-            [(part, budgets.get(part, 0)) for part in sorted(partitions)]
-        ),
-        "partition_selected_counts": str(
-            [(part, partition_selected_counts.get(part, 0)) for part in sorted(partitions)]
-        ),
-        "partition_worker_count": worker_count,
-        "partition_local_greedy_time(s)": round(local_greedy_time, 4),
-        "partition_local_wall_time(s)": round(local_wall_time, 4),
-        "partition_estimated_parallel_local_time(s)": round(estimated_parallel_local_time, 4),
-        "partition_merge_time(s)": round(merge_time, 4),
-        "partition_local_times": str(
-            [(part, local_partition_times.get(part, 0.0)) for part in sorted(partitions)]
-        ),
+        "partition_local_greedy_time(s)": round(candidate_greedy_time, 4),
+        "partition_local_wall_time(s)": round(candidate_greedy_time, 4),
+        "partition_estimated_parallel_local_time(s)": round(candidate_greedy_time, 4),
+        "partition_merge_time(s)": 0.0,
+        "partition_local_times": "[]",
         "wall_time_s": round(time.time() - start_time, 4),
     }
 

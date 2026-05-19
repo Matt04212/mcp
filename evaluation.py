@@ -250,9 +250,11 @@ def evaluate_parallel_mcp(
     distributions,
     n_runs,
     budget_ratio,
-    whole_algo,
-    partition_algo,
     nparts_list,
+    whole_algo=None,
+    partition_algo=None,
+    partition_algos=None,
+    partition_algo_kwargs=None,
     seed_base=1000,
     budget_mode='equal',
     timeout=120,
@@ -268,12 +270,21 @@ def evaluate_parallel_mcp(
     """
     summary_rows = []
     detail_rows = []
+    if partition_algos is None:
+        if partition_algo is None:
+            raise ValueError("provide partition_algo or partition_algos")
+        partition_algos = {partition_algo.__name__: partition_algo}
+    partition_algo_kwargs = partition_algo_kwargs or {}
 
     for nhedges, nvtxs in size:
         budget = max(1, int(round(budget_ratio * nhedges)))
 
         for dist_idx, dist in enumerate(distributions):
-            by_nparts = {nparts: [] for nparts in nparts_list}
+            by_method_nparts = {
+                (method_name, nparts): []
+                for method_name in partition_algos
+                for nparts in nparts_list
+            }
 
             for run in range(1, n_runs + 1):
                 seed = seed_base + 1_000_000 * dist_idx + 10_000 * run + 10 * nhedges + nvtxs
@@ -282,138 +293,153 @@ def evaluate_parallel_mcp(
                 hg.generate(distribution=dist)
 
                 graph_meta = _edge_size_meta(hg)
-                whole_metrics = run_single(hg, whole_algo, filename, budget=budget, **kwargs)
-                whole_weighted = round(
-                    sum(hg.vtx_weights[v] for v in whole_metrics['covered_vertices']), 6
-                )
-
-                for nparts in nparts_list:
-                    partition_metrics = run_single(
-                        hg,
-                        partition_algo,
-                        filename,
-                        budget=budget,
-                        nparts=nparts,
-                        timeout=timeout,
-                        budget_mode=budget_mode,
-                        **kwargs,
+                if whole_algo is not None:
+                    whole_metrics = run_single(hg, whole_algo, filename, budget=budget, **kwargs)
+                    whole_weighted = round(
+                        sum(hg.vtx_weights[v] for v in whole_metrics['covered_vertices']), 6
                     )
-                    partition_weighted = round(
-                        sum(hg.vtx_weights[v] for v in partition_metrics['covered_vertices']), 6
-                    )
-                    partition_stage = partition_metrics.get('stage') or {}
-
-                    row = {
-                        'size': (nhedges, nvtxs),
-                        'distribution': dist,
-                        'run': run,
-                        'seed': seed,
-                        'budget': budget,
-                        'budget_ratio': budget_ratio,
-                        'nparts': nparts,
-                        'budget_mode': budget_mode,
-                        'whole_coverage': len(whole_metrics['covered_vertices']),
-                        'whole_weighted_coverage': whole_weighted,
-                        'whole_time(s)': whole_metrics['time(s)'],
-                        'whole_overlap_ratio': whole_metrics['overlap_ratio'],
-                        'partition_coverage': len(partition_metrics['covered_vertices']),
-                        'partition_weighted_coverage': partition_weighted,
-                        'partition_time(s)': partition_metrics['time(s)'],
-                        'partition_write_time(s)': partition_metrics['write_time(s)'],
-                        'partition_partition_time(s)': partition_metrics['partition_time(s)'],
-                        'partition_overlap_ratio': partition_metrics['overlap_ratio'],
-                        'partition_local_greedy_time(s)': partition_stage.get('partition_local_greedy_time(s)'),
-                        'partition_local_wall_time(s)': partition_stage.get('partition_local_wall_time(s)'),
-                        'partition_estimated_parallel_local_time(s)': partition_stage.get('partition_estimated_parallel_local_time(s)'),
-                        'partition_merge_time(s)': partition_stage.get('partition_merge_time(s)'),
-                        'partition_worker_count': partition_stage.get('partition_worker_count'),
-                        'partition_count': partition_stage.get('partition_count'),
-                        'requested_nparts': partition_stage.get('requested_nparts'),
-                        'partition_edge_counts': partition_stage.get('partition_edge_counts'),
-                        'partition_budgets': partition_stage.get('partition_budgets'),
-                        'partition_selected_counts': partition_stage.get('partition_selected_counts'),
-                        'partition_local_times': partition_stage.get('partition_local_times'),
-                        'quality_ratio': round(partition_weighted / whole_weighted, 6)
-                        if whole_weighted > 0 else None,
-                        'quality_gap': round(whole_weighted - partition_weighted, 6),
-                        'quality_loss_pct': round(
-                            100.0 * (whole_weighted - partition_weighted) / whole_weighted, 4
-                        ) if whole_weighted > 0 else None,
-                        'time_saved(s)': round(
-                            whole_metrics['time(s)'] - partition_metrics['time(s)'], 6
-                        ),
-                        'time_change_pct': round(
-                            100.0 * (whole_metrics['time(s)'] - partition_metrics['time(s)'])
-                            / whole_metrics['time(s)'],
-                            4,
-                        ) if whole_metrics['time(s)'] > 0 else None,
-                        'time_ratio': round(
-                            partition_metrics['time(s)'] / whole_metrics['time(s)'], 6
-                        ) if whole_metrics['time(s)'] > 0 else None,
-                        'estimated_parallel_time(s)': round(
-                            (partition_metrics['partition_time(s)'] or 0.0)
-                            + (partition_stage.get('partition_estimated_parallel_local_time(s)') or 0.0)
-                            + (partition_stage.get('partition_merge_time(s)') or 0.0),
-                            6,
-                        ),
-                        **graph_meta,
+                else:
+                    whole_metrics = {
+                        'covered_vertices': set(),
+                        'time(s)': None,
+                        'overlap_ratio': None,
                     }
-                    row['estimated_parallel_time_saved(s)'] = round(
-                        whole_metrics['time(s)'] - row['estimated_parallel_time(s)'],
-                        6,
-                    )
-                    row['estimated_parallel_time_change_pct'] = round(
-                        100.0 * row['estimated_parallel_time_saved(s)'] / whole_metrics['time(s)'],
-                        4,
-                    ) if whole_metrics['time(s)'] > 0 else None
-                    row['estimated_parallel_time_ratio'] = round(
-                        row['estimated_parallel_time(s)'] / whole_metrics['time(s)'],
-                        6,
-                    ) if whole_metrics['time(s)'] > 0 else None
+                    whole_weighted = None
 
-                    by_nparts[nparts].append(row)
-                    detail_rows.append(row)
+                for method_name, partition_func in partition_algos.items():
+                    method_kwargs = partition_algo_kwargs.get(method_name, {})
+                    for nparts in nparts_list:
+                        partition_metrics = run_single(
+                            hg,
+                            partition_func,
+                            filename,
+                            budget=budget,
+                            nparts=nparts,
+                            timeout=timeout,
+                            budget_mode=budget_mode,
+                            partition_seed=seed,
+                            **method_kwargs,
+                            **kwargs,
+                        )
+                        partition_weighted = round(
+                            sum(hg.vtx_weights[v] for v in partition_metrics['covered_vertices']), 6
+                        )
+                        partition_stage = partition_metrics.get('stage') or {}
+
+                        row = {
+                            'size': (nhedges, nvtxs),
+                            'distribution': dist,
+                            'partition_method': method_name,
+                            'run': run,
+                            'seed': seed,
+                            'budget': budget,
+                            'budget_ratio': budget_ratio,
+                            'nparts': nparts,
+                            'budget_mode': budget_mode,
+                            'whole_coverage': len(whole_metrics['covered_vertices']) if whole_algo is not None else None,
+                            'whole_weighted_coverage': whole_weighted,
+                            'whole_time(s)': whole_metrics['time(s)'],
+                            'whole_overlap_ratio': whole_metrics['overlap_ratio'],
+                            'partition_coverage': len(partition_metrics['covered_vertices']),
+                            'partition_weighted_coverage': partition_weighted,
+                            'partition_time(s)': partition_metrics['time(s)'],
+                            'partition_write_time(s)': partition_metrics['write_time(s)'],
+                            'partition_partition_time(s)': partition_metrics['partition_time(s)'],
+                            'partition_overlap_ratio': partition_metrics['overlap_ratio'],
+                            'partition_local_greedy_time(s)': partition_stage.get('partition_local_greedy_time(s)'),
+                            'partition_local_wall_time(s)': partition_stage.get('partition_local_wall_time(s)'),
+                            'partition_estimated_parallel_local_time(s)': partition_stage.get('partition_estimated_parallel_local_time(s)'),
+                            'partition_merge_time(s)': partition_stage.get('partition_merge_time(s)'),
+                            'partition_count': partition_stage.get('partition_count'),
+                            'requested_nparts': partition_stage.get('requested_nparts'),
+                            'partition_edge_counts': partition_stage.get('partition_edge_counts'),
+                            'partition_budgets': partition_stage.get('partition_budgets'),
+                            'partition_selected_counts': partition_stage.get('partition_selected_counts'),
+                            'partition_local_times': partition_stage.get('partition_local_times'),
+                            'quality_ratio': round(partition_weighted / whole_weighted, 6)
+                            if whole_weighted and whole_weighted > 0 else None,
+                            'quality_gap': round(whole_weighted - partition_weighted, 6)
+                            if whole_weighted is not None else None,
+                            'quality_loss_pct': round(
+                                100.0 * (whole_weighted - partition_weighted) / whole_weighted, 4
+                            ) if whole_weighted and whole_weighted > 0 else None,
+                            'time_saved(s)': round(
+                                whole_metrics['time(s)'] - partition_metrics['time(s)'], 6
+                            ) if whole_metrics['time(s)'] is not None else None,
+                            'time_change_pct': round(
+                                100.0 * (whole_metrics['time(s)'] - partition_metrics['time(s)'])
+                                / whole_metrics['time(s)'],
+                                4,
+                            ) if whole_metrics['time(s)'] and whole_metrics['time(s)'] > 0 else None,
+                            'time_ratio': round(
+                                partition_metrics['time(s)'] / whole_metrics['time(s)'], 6
+                            ) if whole_metrics['time(s)'] and whole_metrics['time(s)'] > 0 else None,
+                            'estimated_parallel_time(s)': round(
+                                (partition_metrics['partition_time(s)'] or 0.0)
+                                + (partition_stage.get('partition_estimated_parallel_local_time(s)') or 0.0)
+                                + (partition_stage.get('partition_merge_time(s)') or 0.0),
+                                6,
+                            ),
+                            **graph_meta,
+                        }
+                        row['estimated_parallel_time_saved(s)'] = round(
+                            whole_metrics['time(s)'] - row['estimated_parallel_time(s)'],
+                            6,
+                        ) if whole_metrics['time(s)'] is not None else None
+                        row['estimated_parallel_time_change_pct'] = round(
+                            100.0 * row['estimated_parallel_time_saved(s)'] / whole_metrics['time(s)'],
+                            4,
+                        ) if whole_metrics['time(s)'] and whole_metrics['time(s)'] > 0 else None
+                        row['estimated_parallel_time_ratio'] = round(
+                            row['estimated_parallel_time(s)'] / whole_metrics['time(s)'],
+                            6,
+                        ) if whole_metrics['time(s)'] and whole_metrics['time(s)'] > 0 else None
+
+                        by_method_nparts[(method_name, nparts)].append(row)
+                        detail_rows.append(row)
 
                 print(f"  [{dist} {nhedges},{nvtxs}] run {run}/{n_runs} done")
 
-            for nparts in nparts_list:
-                runs = by_nparts[nparts]
-                summary_rows.append({
-                    'size': (nhedges, nvtxs),
-                    'distribution': dist,
-                    'nparts': nparts,
-                    'budget': budget,
-                    'budget_ratio': budget_ratio,
-                    'budget_mode': budget_mode,
-                    'runs': len(runs),
-                    'whole_weighted_coverage': _safe_mean(runs, 'whole_weighted_coverage'),
-                    'partition_weighted_coverage': _safe_mean(runs, 'partition_weighted_coverage'),
-                    'quality_ratio': _safe_mean(runs, 'quality_ratio'),
-                    'std_quality_ratio': _safe_std(runs, 'quality_ratio'),
-                    'quality_gap': _safe_mean(runs, 'quality_gap'),
-                    'quality_loss_pct': _safe_mean(runs, 'quality_loss_pct'),
-                    'whole_time(s)': _safe_mean(runs, 'whole_time(s)'),
-                    'partition_time(s)': _safe_mean(runs, 'partition_time(s)'),
-                    'time_saved(s)': _safe_mean(runs, 'time_saved(s)'),
-                    'time_change_pct': _safe_mean(runs, 'time_change_pct'),
-                    'time_ratio': _safe_mean(runs, 'time_ratio'),
-                    'partition_write_time(s)': _safe_mean(runs, 'partition_write_time(s)'),
-                    'partition_partition_time(s)': _safe_mean(runs, 'partition_partition_time(s)'),
-                    'partition_local_greedy_time(s)': _safe_mean(runs, 'partition_local_greedy_time(s)'),
-                    'partition_local_wall_time(s)': _safe_mean(runs, 'partition_local_wall_time(s)'),
-                    'partition_estimated_parallel_local_time(s)': _safe_mean(runs, 'partition_estimated_parallel_local_time(s)'),
-                    'partition_merge_time(s)': _safe_mean(runs, 'partition_merge_time(s)'),
-                    'estimated_parallel_time(s)': _safe_mean(runs, 'estimated_parallel_time(s)'),
-                    'estimated_parallel_time_saved(s)': _safe_mean(runs, 'estimated_parallel_time_saved(s)'),
-                    'estimated_parallel_time_change_pct': _safe_mean(runs, 'estimated_parallel_time_change_pct'),
-                    'estimated_parallel_time_ratio': _safe_mean(runs, 'estimated_parallel_time_ratio'),
-                    'whole_overlap_ratio': _safe_mean(runs, 'whole_overlap_ratio'),
-                    'partition_overlap_ratio': _safe_mean(runs, 'partition_overlap_ratio'),
-                    'min_edge_size': _safe_mean(runs, 'min_edge_size'),
-                    'mean_edge_size': _safe_mean(runs, 'mean_edge_size'),
-                    'median_edge_size': _safe_mean(runs, 'median_edge_size'),
-                    'max_edge_size': _safe_mean(runs, 'max_edge_size'),
-                })
+            for method_name in partition_algos:
+                for nparts in nparts_list:
+                    runs = by_method_nparts[(method_name, nparts)]
+                    summary_rows.append({
+                        'size': (nhedges, nvtxs),
+                        'distribution': dist,
+                        'partition_method': method_name,
+                        'nparts': nparts,
+                        'budget': budget,
+                        'budget_ratio': budget_ratio,
+                        'budget_mode': budget_mode,
+                        'runs': len(runs),
+                        'whole_weighted_coverage': _safe_mean(runs, 'whole_weighted_coverage'),
+                        'partition_weighted_coverage': _safe_mean(runs, 'partition_weighted_coverage'),
+                        'quality_ratio': _safe_mean(runs, 'quality_ratio'),
+                        'std_quality_ratio': _safe_std(runs, 'quality_ratio'),
+                        'quality_gap': _safe_mean(runs, 'quality_gap'),
+                        'quality_loss_pct': _safe_mean(runs, 'quality_loss_pct'),
+                        'whole_time(s)': _safe_mean(runs, 'whole_time(s)'),
+                        'partition_time(s)': _safe_mean(runs, 'partition_time(s)'),
+                        'time_saved(s)': _safe_mean(runs, 'time_saved(s)'),
+                        'time_change_pct': _safe_mean(runs, 'time_change_pct'),
+                        'time_ratio': _safe_mean(runs, 'time_ratio'),
+                        'partition_write_time(s)': _safe_mean(runs, 'partition_write_time(s)'),
+                        'partition_partition_time(s)': _safe_mean(runs, 'partition_partition_time(s)'),
+                        'partition_local_greedy_time(s)': _safe_mean(runs, 'partition_local_greedy_time(s)'),
+                        'partition_local_wall_time(s)': _safe_mean(runs, 'partition_local_wall_time(s)'),
+                        'partition_estimated_parallel_local_time(s)': _safe_mean(runs, 'partition_estimated_parallel_local_time(s)'),
+                        'partition_merge_time(s)': _safe_mean(runs, 'partition_merge_time(s)'),
+                        'estimated_parallel_time(s)': _safe_mean(runs, 'estimated_parallel_time(s)'),
+                        'estimated_parallel_time_saved(s)': _safe_mean(runs, 'estimated_parallel_time_saved(s)'),
+                        'estimated_parallel_time_change_pct': _safe_mean(runs, 'estimated_parallel_time_change_pct'),
+                        'estimated_parallel_time_ratio': _safe_mean(runs, 'estimated_parallel_time_ratio'),
+                        'whole_overlap_ratio': _safe_mean(runs, 'whole_overlap_ratio'),
+                        'partition_overlap_ratio': _safe_mean(runs, 'partition_overlap_ratio'),
+                        'min_edge_size': _safe_mean(runs, 'min_edge_size'),
+                        'mean_edge_size': _safe_mean(runs, 'mean_edge_size'),
+                        'median_edge_size': _safe_mean(runs, 'median_edge_size'),
+                        'max_edge_size': _safe_mean(runs, 'max_edge_size'),
+                    })
 
     if return_details:
         return summary_rows, detail_rows
