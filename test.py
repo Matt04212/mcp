@@ -6,9 +6,7 @@ import pandas as pd
 
 from algo import (
     hmetis_partitioned_greedy_mcp,
-    hmetis_one_shot_pool_mcp,
     hype_partitioned_greedy_mcp,
-    patoh_partitioned_greedy_mcp,
     pure_greedy_mcp,
     random_partitioned_greedy_mcp,
 )
@@ -20,24 +18,27 @@ DIST = [
     #'beta_bell',
     #'beta_left',
     #'uniform',
-    'dis2'
+    'spatial_right_skewed',
+    #'spatial_bell',
+    #'spatial_left_skewed',
+    #'spatial_uniform'
 ]
 
 SIZE = [
-    #(2500, 5000),
+    (2500, 5000),
     #(5000, 10000),
     #(7500, 15000),
     #(10000, 20000),
     #(20000, 40000),
     #(30000, 60000),
-    (50000, 100000),
+    #(50000, 100000),
     #(70000, 1400000),
     #(100000, 200000),
     #(150000, 300000),
     #(300000, 600000)
 ]
 
-NPARTS = [4]
+NPARTS = [2]
 PARTITION_METHODS = {
     'hmetis': {
         'enabled': True,
@@ -59,36 +60,15 @@ PARTITION_METHODS = {
         'func': random_partitioned_greedy_mcp,
         'kwargs': {},
     },
-    'hmetis_pool_once': {
-        'enabled': False,
-        'func': hmetis_one_shot_pool_mcp,
+    'hype': {
+        'enabled': True,
+        'func': hype_partitioned_greedy_mcp,
         'kwargs': {
-            'top_per_partition': 6,
-            'global_top_k': None,
-            'pool_factor': 2.0,
-            'hmetis_params': {
-                'ubfactor': 5,
-                'nruns': 1,
-                'ctype': 5,
-                'rtype': 3,
-                'vcycle': 0,
-                'reconst': 0,
-                'dbglvl': 0,
+            'hype_params': {
+                'fringe_size': 10,
+                'fringe_candidates': 2,
             },
         },
-    },
-    'patoh': {
-        'enabled': False,
-        'func': patoh_partitioned_greedy_mcp,
-        'kwargs': {
-            'patoh_binary': './patoh',
-            'patoh_args': ['NR=1'],
-        },
-    },
-    'hype': {
-        'enabled': False,
-        'func': hype_partitioned_greedy_mcp,
-        'kwargs': {},
     },
 }
 
@@ -119,13 +99,6 @@ ACTIVE_PARTITION_METHOD_KWARGS = {
 
 if not ACTIVE_PARTITION_METHODS:
     raise ValueError("enable at least one partition method in PARTITION_METHODS")
-
-if PARTITION_METHODS['patoh']['enabled']:
-    patoh_binary = Path(PARTITION_METHODS['patoh']['kwargs']['patoh_binary'])
-    if not patoh_binary.exists():
-        raise FileNotFoundError(
-            f"PaToH is enabled but binary was not found at {patoh_binary}"
-        )
 
 
 summary_rows = evaluate_parallel_mcp(

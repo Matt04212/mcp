@@ -5,6 +5,117 @@ import random
 def _beta_rvs(a, b, size):
     return np.random.beta(a, b, size=size)
 
+
+def _scale_radius_for_density(radius, nvtxs, reference_nvtxs):
+    return radius * np.sqrt(reference_nvtxs / nvtxs)
+
+
+def _spatial_distances(elem_x, elem_y, cx, cy, toroidal=False):
+    dx = np.abs(elem_x - cx)
+    dy = np.abs(elem_y - cy)
+    if toroidal:
+        dx = np.minimum(dx, 1.0 - dx)
+        dy = np.minimum(dy, 1.0 - dy)
+    return np.sqrt(dx * dx + dy * dy)
+
+
+def _assign_isolated_vertices(vtxs, vtxs_dict, hedge_centers_x, hedge_centers_y,
+                              hedge_ids, hedge_dict, elem_x, elem_y, toroidal=False):
+    for vtx in vtxs_dict:
+        if not vtxs_dict[vtx]:
+            vx, vy = elem_x[vtx - 1], elem_y[vtx - 1]
+            dists = _spatial_distances(
+                hedge_centers_x,
+                hedge_centers_y,
+                vx,
+                vy,
+                toroidal=toroidal,
+            )
+            nearest_hedge = hedge_ids[int(np.argmin(dists))]
+            hedge_dict[nearest_hedge].add(vtx)
+            vtxs_dict[vtx].add(nearest_hedge)
+
+
+def _assign_empty_hedges(hedges, hedge_dict, vtxs_dict, hedge_centers_x, hedge_centers_y,
+                         elem_x, elem_y, toroidal=False):
+    for hedge, fx, fy in zip(hedges, hedge_centers_x, hedge_centers_y):
+        if hedge_dict[hedge]:
+            continue
+        dists = _spatial_distances(elem_x, elem_y, fx, fy, toroidal=toroidal)
+        nearest_vtx = int(np.argmin(dists)) + 1
+        hedge_dict[hedge].add(nearest_vtx)
+        vtxs_dict[nearest_vtx].add(hedge)
+
+
+def _build_spatial_radius_hypergraph(hg, radii, toroidal=False):
+    elem_x = np.random.uniform(0, 1, hg.nvtxs)
+    elem_y = np.random.uniform(0, 1, hg.nvtxs)
+    center_x = np.random.uniform(0, 1, hg.nhedges)
+    center_y = np.random.uniform(0, 1, hg.nhedges)
+
+    hg.hedges_dict = {}
+    hg.vtxs_dict = {vtx: set() for vtx in hg.vtxs}
+
+    for hedge, fx, fy, radius in zip(hg.hedges, center_x, center_y, radii):
+        dists = _spatial_distances(elem_x, elem_y, fx, fy, toroidal=toroidal)
+        covered = set(np.where(dists <= radius)[0] + 1)
+        hg.hedges_dict[hedge] = covered
+        for vtx in covered:
+            hg.vtxs_dict[vtx].add(hedge)
+
+    _assign_isolated_vertices(
+        hg.vtxs,
+        hg.vtxs_dict,
+        center_x,
+        center_y,
+        hg.hedges,
+        hg.hedges_dict,
+        elem_x,
+        elem_y,
+        toroidal=toroidal,
+    )
+    _assign_empty_hedges(
+        hg.hedges,
+        hg.hedges_dict,
+        hg.vtxs_dict,
+        center_x,
+        center_y,
+        elem_x,
+        elem_y,
+        toroidal=toroidal,
+    )
+
+
+def _build_spatial_knn_hypergraph(hg, hedge_sizes, toroidal=False):
+    elem_x = np.random.uniform(0, 1, hg.nvtxs)
+    elem_y = np.random.uniform(0, 1, hg.nvtxs)
+    center_x = np.random.uniform(0, 1, hg.nhedges)
+    center_y = np.random.uniform(0, 1, hg.nhedges)
+
+    hg.hedges_dict = {}
+    hg.vtxs_dict = {vtx: set() for vtx in hg.vtxs}
+
+    for hedge, cx, cy, hedge_size in zip(hg.hedges, center_x, center_y, hedge_sizes):
+        hedge_size = max(1, min(int(hedge_size), hg.nvtxs))
+        dists = _spatial_distances(elem_x, elem_y, cx, cy, toroidal=toroidal)
+        nearest_idx = np.argpartition(dists, hedge_size - 1)[:hedge_size]
+        covered = set((nearest_idx + 1).tolist())
+        hg.hedges_dict[hedge] = covered
+        for vtx in covered:
+            hg.vtxs_dict[vtx].add(hedge)
+
+    _assign_isolated_vertices(
+        hg.vtxs,
+        hg.vtxs_dict,
+        center_x,
+        center_y,
+        hg.hedges,
+        hg.hedges_dict,
+        elem_x,
+        elem_y,
+        toroidal=toroidal,
+    )
+
 class Hypergraph:
     def __init__(self, nhedges, nvtxs):
         self.nhedges = nhedges
@@ -96,8 +207,12 @@ class Hypergraph:
 
             return
 
-        elif distribution == 'dis2':
-            rmax = kwargs.get('rmax', 0.005)
+        elif distribution == 'spatial_bell':
+            rmax = kwargs.get('rmax', 0.019)
+            auto_scale = kwargs.get('auto_scale', True)
+            reference_nvtxs = kwargs.get('reference_nvtxs', 10000)
+            if auto_scale:
+                rmax = _scale_radius_for_density(rmax, self.nvtxs, reference_nvtxs)
 
             # generate coordinates for all vertices
             elem_x = np.random.uniform(0, 1, self.nvtxs)
@@ -119,17 +234,45 @@ class Hypergraph:
                 for vtx in covered:
                     self.vtxs_dict[vtx].add(hedge)
 
-            # handle isolated vertices - assign to nearest facility
-            for vtx in self.vtxs_dict:
-                if not self.vtxs_dict[vtx]:
-                    vx, vy = elem_x[vtx - 1], elem_y[vtx - 1]
-                    dists = np.sqrt((elem_x[facility_idx] - vx) ** 2 +
-                                    (elem_y[facility_idx] - vy) ** 2)
+            _assign_isolated_vertices(
+                self.vtxs,
+                self.vtxs_dict,
+                elem_x[facility_idx],
+                elem_y[facility_idx],
+                self.hedges,
+                self.hedges_dict,
+                elem_x,
+                elem_y,
+            )
 
-                    nearest_hedge = self.hedges[np.argmin(dists)]
-                    self.hedges_dict[nearest_hedge].add(vtx)
-                    self.vtxs_dict[vtx].add(nearest_hedge)
+            return
 
+        elif distribution == 'spatial_right_skewed':
+            max_size = kwargs.get('max_size', 25)
+            beta_a = kwargs.get('beta_a', 2)
+            beta_b = kwargs.get('beta_b', 5)
+            toroidal = kwargs.get('toroidal', True)
+            raw = _beta_rvs(beta_a, beta_b, size=self.nhedges)
+            hedge_sizes = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
+            _build_spatial_knn_hypergraph(self, hedge_sizes, toroidal=toroidal)
+            return
+
+        elif distribution == 'spatial_left_skewed':
+            max_size = kwargs.get('max_size', 25)
+            beta_a = kwargs.get('beta_a', 5)
+            beta_b = kwargs.get('beta_b', 2)
+            toroidal = kwargs.get('toroidal', True)
+            raw = _beta_rvs(beta_a, beta_b, size=self.nhedges)
+            hedge_sizes = np.clip((raw * max_size).astype(int), 1, self.nvtxs)
+            _build_spatial_knn_hypergraph(self, hedge_sizes, toroidal=toroidal)
+            return
+
+        elif distribution == 'spatial_uniform':
+            low = kwargs.get('low', 1)
+            high = kwargs.get('high', 23)
+            toroidal = kwargs.get('toroidal', True)
+            hedge_sizes = np.random.randint(low, high + 1, size=self.nhedges)
+            _build_spatial_knn_hypergraph(self, hedge_sizes, toroidal=toroidal)
             return
 
         # clip to valid range
@@ -161,9 +304,3 @@ class Hypergraph:
                 hedges = self.vtxs_dict[vtxs]
                 line = " ".join(str(n) for n in hedges)
                 f.write(line + "\n")
-
-
-
-
-
-

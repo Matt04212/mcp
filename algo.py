@@ -1,9 +1,11 @@
 
 import heapq
+import importlib.util
 import os
 import random
 import subprocess, time
 from collections import deque
+from pathlib import Path
 import numpy as np
 from subgraph2 import HgrWriter, write_hgr
 
@@ -315,6 +317,131 @@ def _write_patoh_hypergraph(hg, filename):
     return e_map_inv
 
 
+def _kahypar_spec():
+    return importlib.util.find_spec("kahypar")
+
+
+def _resolve_kahypar_config(kahypar_module, config_path=None, preset="km1_kKaHyPar_sea20.ini"):
+    if config_path:
+        resolved = Path(config_path).expanduser()
+        if not resolved.exists():
+            raise FileNotFoundError(f"KaHyPar config file not found: {resolved}")
+        return str(resolved)
+
+    module_path = Path(kahypar_module.__file__).resolve()
+    candidate_paths = [
+        module_path.parent / "config" / preset,
+        module_path.parent.parent / "config" / preset,
+        module_path.parent.parent.parent / "config" / preset,
+        Path.cwd() / "config" / preset,
+    ]
+
+    for candidate in candidate_paths:
+        if candidate.exists():
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Could not locate a KaHyPar config .ini file automatically. "
+        "Provide kahypar_config in test.py."
+    )
+
+
+def _build_kahypar_hypergraph(hg, num_blocks):
+    live_edges = list(hg.hedges)
+    e_map = {edge: idx for idx, edge in enumerate(live_edges)}
+    e_map_inv = {idx: edge for idx, edge in enumerate(live_edges)}
+
+    hyperedge_indices = [0]
+    hyperedges = []
+    edge_weights = []
+    for vtx in hg.vtxs:
+        incident = [e_map[edge] for edge in hg.vtxs_dict[vtx] if edge in e_map]
+        if not incident:
+            continue
+        hyperedges.extend(sorted(incident))
+        hyperedge_indices.append(len(hyperedges))
+        edge_weights.append(1)
+
+    node_weights = [1] * len(live_edges)
+    return (
+        e_map_inv,
+        len(live_edges),
+        len(edge_weights),
+        hyperedge_indices,
+        hyperedges,
+        edge_weights,
+        node_weights,
+    )
+
+
+def _kahypar_fixed_partitions(
+    hg,
+    nparts,
+    seed=None,
+    epsilon=0.03,
+    config_path=None,
+    config_preset="km1_kKaHyPar_sea20.ini",
+):
+    spec = _kahypar_spec()
+    if spec is None:
+        raise ModuleNotFoundError(
+            "kahypar Python package is not installed in the active environment"
+        )
+
+    import kahypar
+
+    cur_nparts = min(nparts, hg.nhedges)
+    if cur_nparts <= 1:
+        return {0: set(hg.hedges)}, 0.0, 0.0
+
+    (
+        e_map_inv,
+        num_nodes,
+        num_nets,
+        hyperedge_indices,
+        hyperedges,
+        edge_weights,
+        node_weights,
+    ) = _build_kahypar_hypergraph(hg, cur_nparts)
+
+    if num_nodes <= 0:
+        return {}, 0.0, 0.0
+
+    hypergraph = kahypar.Hypergraph(
+        num_nodes,
+        num_nets,
+        hyperedge_indices,
+        hyperedges,
+        cur_nparts,
+        edge_weights,
+        node_weights,
+    )
+
+    context = kahypar.Context()
+    context.loadINIconfiguration(
+        _resolve_kahypar_config(
+            kahypar,
+            config_path=config_path,
+            preset=config_preset,
+        )
+    )
+    context.setK(cur_nparts)
+    context.setEpsilon(float(epsilon))
+    if seed is not None and hasattr(context, "setSeed"):
+        context.setSeed(int(seed))
+
+    start = time.time()
+    kahypar.partition(hypergraph, context)
+    partition_time = time.time() - start
+
+    partitions = {}
+    for node_id in range(num_nodes):
+        part = int(hypergraph.blockID(node_id))
+        partitions.setdefault(part, set()).add(e_map_inv[node_id])
+
+    return partitions, 0.0, partition_time
+
+
 def _run_patoh(binary_path, filename, nparts, timeout=120, seed=None, extra_args=None):
     part_file = f"{filename}.part.{nparts}"
     if os.path.exists(part_file):
@@ -387,82 +514,106 @@ def _patoh_fixed_partitions(hg, filename, nparts, timeout, binary_path, seed=Non
     return partitions, parse_time, partition_time
 
 
-def _hype_fixed_partitions(hg, nparts, seed=None):
+def _hype_fixed_partitions(hg, nparts, seed=None, fringe_size=10, fringe_candidates=2):
     cur_nparts = min(nparts, hg.nhedges)
     if cur_nparts <= 1:
         return {0: set(hg.hedges)}, 0.0, 0.0
 
     rng = random.Random(seed)
-    edge_order = list(hg.hedges)
-    rng.shuffle(edge_order)
-    edge_order.sort(key=lambda edge: (-len(hg.hedges_dict[edge]), edge))
+    s = max(1, int(fringe_size))
+    r = max(1, int(fringe_candidates))
 
     target_sizes = [hg.nhedges // cur_nparts] * cur_nparts
-    for i in range(hg.nhedges % cur_nparts):
-        target_sizes[i] += 1
+    for idx in range(hg.nhedges % cur_nparts):
+        target_sizes[idx] += 1
 
     neighbor_cache = {}
+    net_size_cache = {net: len(hg.vtxs_dict[net]) for net in hg.vtxs}
+    unassigned = set(hg.hedges)
+    partitions = {part: set() for part in range(cur_nparts)}
 
     def neighbors(edge):
         if edge not in neighbor_cache:
             nbrs = set()
-            for vtx in hg.hedges_dict[edge]:
-                nbrs.update(hg.vtxs_dict[vtx])
+            for net in hg.hedges_dict[edge]:
+                nbrs.update(hg.vtxs_dict[net])
             nbrs.discard(edge)
             neighbor_cache[edge] = nbrs
         return neighbor_cache[edge]
 
-    unassigned = set(hg.hedges)
-    partitions = {part: set() for part in range(cur_nparts)}
+    def external_neighbors_score(edge, fringe):
+        return len(neighbors(edge) - fringe)
+
+    def random_unassigned_vertex():
+        if not unassigned:
+            return None
+        return rng.choice(tuple(unassigned))
 
     for part in range(cur_nparts):
         target = target_sizes[part]
         if target <= 0 or not unassigned:
             continue
 
-        seed_edge = None
-        for edge in edge_order:
-            if edge in unassigned:
-                seed_edge = edge
-                break
+        core = set()
+        fringe = set()
+        cache = {}
+
+        seed_edge = random_unassigned_vertex()
         if seed_edge is None:
             break
-
+        core.add(seed_edge)
         partitions[part].add(seed_edge)
         unassigned.remove(seed_edge)
-        core_vertices = set(hg.hedges_dict[seed_edge])
-        fringe = set(neighbors(seed_edge)) & unassigned
 
-        while len(partitions[part]) < target and unassigned:
+        while len(core) < target and unassigned:
+            # Algorithm 2: determine r fringe candidate vertices
+            fringe_candidates_set = set()
+            incident_nets = set()
+            for edge in core:
+                incident_nets.update(hg.hedges_dict[edge])
+            ordered_nets = sorted(
+                incident_nets,
+                key=lambda net: (net_size_cache[net], net),
+            )
+
+            for net in ordered_nets:
+                for edge in hg.vtxs_dict[net]:
+                    if edge in fringe or edge in core or edge not in unassigned:
+                        continue
+                    fringe_candidates_set.add(edge)
+                    if len(fringe_candidates_set) >= r:
+                        break
+                if len(fringe_candidates_set) >= r:
+                    break
+
+            # Cache dext(v, F_i) once per partition, as in the paper's pseudocode.
+            for edge in fringe_candidates_set:
+                if edge not in cache:
+                    cache[edge] = external_neighbors_score(edge, fringe)
+
+            # Update fringe: keep the best s vertices from F_i U F_cand.
+            ranked_fringe = sorted(
+                fringe | fringe_candidates_set,
+                key=lambda edge: (cache.get(edge, float("inf")), edge),
+            )
+            fringe = set(ranked_fringe[:s])
+
             if not fringe:
-                remaining = sorted(
-                    unassigned,
-                    key=lambda edge: (-len(hg.hedges_dict[edge]), edge),
-                )
-                chosen = remaining[0]
-            else:
-                chosen = max(
-                    fringe,
-                    key=lambda edge: (
-                        len(hg.hedges_dict[edge] & core_vertices),
-                        -len(hg.hedges_dict[edge] - core_vertices),
-                        -len(neighbors(edge) & unassigned),
-                        -edge,
-                    ),
-                )
+                random_edge = random_unassigned_vertex()
+                if random_edge is None:
+                    break
+                fringe = {random_edge}
+                if random_edge not in cache:
+                    cache[random_edge] = external_neighbors_score(random_edge, set())
 
+            # Algorithm 3: move vertex with minimal cached external score into core.
+            chosen = min(fringe, key=lambda edge: (cache.get(edge, float("inf")), edge))
+            fringe.remove(chosen)
+            core.add(chosen)
             partitions[part].add(chosen)
             unassigned.remove(chosen)
-            fringe.discard(chosen)
-            newly_seen = hg.hedges_dict[chosen] - core_vertices
-            core_vertices.update(hg.hedges_dict[chosen])
-            fringe.update(neighbors(chosen) & unassigned)
 
-            if newly_seen:
-                fringe = {
-                    edge for edge in fringe
-                    if edge in unassigned
-                }
+        # Any leftover unassigned vertices are handled by later partitions / final sweep.
 
     if unassigned:
         ordered_parts = sorted(partitions, key=lambda part: len(partitions[part]))
@@ -507,8 +658,30 @@ def _fixed_partitions(hg, filename, nparts, timeout, method="hmetis", seed=None,
         write_time = max(0.0, time.time() - start - partition_time - parse_time)
         return partitions, write_time, partition_time
 
+    if method == "kahypar":
+        partitions, parse_time, partition_time = _kahypar_fixed_partitions(
+            hg,
+            nparts,
+            seed=seed,
+            epsilon=partition_kwargs.get("kahypar_epsilon", 0.03),
+            config_path=partition_kwargs.get("kahypar_config"),
+            config_preset=partition_kwargs.get(
+                "kahypar_config_preset",
+                "km1_kKaHyPar_sea20.ini",
+            ),
+        )
+        write_time = max(0.0, time.time() - start - partition_time - parse_time)
+        return partitions, write_time, partition_time
+
     if method == "hype":
-        partitions, _, _ = _hype_fixed_partitions(hg, nparts, seed=seed)
+        hype_params = partition_kwargs.get("hype_params") or {}
+        partitions, _, _ = _hype_fixed_partitions(
+            hg,
+            nparts,
+            seed=seed,
+            fringe_size=hype_params.get("fringe_size", 10),
+            fringe_candidates=hype_params.get("fringe_candidates", 2),
+        )
         return partitions, 0.0, time.time() - start
 
     raise ValueError(f"unknown partition method: {method}")
@@ -1138,6 +1311,35 @@ def patoh_partitioned_greedy_mcp(
         partition_seed=partition_seed,
         patoh_binary=patoh_binary,
         patoh_args=patoh_args,
+        **kwargs,
+    )
+
+
+def kahypar_partitioned_greedy_mcp(
+    hg,
+    budget,
+    filename,
+    nparts=8,
+    timeout=120,
+    budget_mode="equal",
+    partition_seed=None,
+    kahypar_config=None,
+    kahypar_config_preset="km1_kKaHyPar_sea20.ini",
+    kahypar_epsilon=0.03,
+    **kwargs,
+):
+    return _run_partitioned_greedy_mcp(
+        hg,
+        budget,
+        filename,
+        nparts=nparts,
+        timeout=timeout,
+        budget_mode=budget_mode,
+        partition_method="kahypar",
+        partition_seed=partition_seed,
+        kahypar_config=kahypar_config,
+        kahypar_config_preset=kahypar_config_preset,
+        kahypar_epsilon=kahypar_epsilon,
         **kwargs,
     )
 
